@@ -1,0 +1,38 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+service-account*.json
+
+# Local data and generated files
+data/INFLUD*.csv
+outputs/*
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# Editors and OS
+.vscode/
+.DS_Store
+Thumbs.db
+# Temporary local correction notes
+APLICAR_CORRECAO_*.md
+README_APLICAR.txt
+
+# Build artifacts
+*.egg-info/
