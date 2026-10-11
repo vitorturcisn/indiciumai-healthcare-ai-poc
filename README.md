@@ -2,7 +2,7 @@
 
 
 
-Prova de conceito de Inteligência Artificial Generativa para monitoramento epidemiológico da \*\*Síndrome Respiratória Aguda Grave (SRAG)\*\*, utilizando dados públicos do DATASUS, métricas epidemiológicas, gráficos e notícias de fontes institucionais.
+Prova de conceito de \*\*Inteligência Artificial Generativa para monitoramento epidemiológico da Síndrome Respiratória Aguda Grave (SRAG)\*\*, utilizando dados públicos do DATASUS, métricas epidemiológicas, gráficos e notícias de fontes institucionais.
 
 
 
@@ -19,10 +19,6 @@ O projeto foi desenvolvido para avaliar a viabilidade de uma solução que ajude
 
 
 \## 1. Objetivos do projeto
-
-
-
-A PoC foi desenvolvida para atender aos seguintes objetivos:
 
 
 
@@ -220,7 +216,7 @@ As consultas analíticas são executadas por funções controladas, e não por S
 
 
 
-O modelo padrão configurado no projeto é `gemini-3.8-flash`. Ele pode ser alterado por meio da opção `--model` ou da variável de ambiente `GEMINI\_MODEL`. Consulte a \[documentação oficial dos modelos Gemini](https://ai.google.dev/gemini-api/docs/models) para verificar os modelos e recursos disponíveis.
+O modelo padrão configurado no projeto é `gemini-3.8-flash`. Ele pode ser alterado por meio da opção `--model` ou da variável de ambiente `GEMINI\_MODEL`. Consulte a \[documentação oficial dos modelos Gemini](https://ai.google.dev/gemini-api/docs/models) e verifique quais modelos habilitados para sua chave suportam function calling.
 
 
 
@@ -388,9 +384,9 @@ A métrica é definida como a proporção de óbitos por qualquer causa entre os
 
 
 
-\- Numerador: `EVOLUCAO = 2` ou `EVOLUCAO = 3`.
+\- \*\*Numerador:\*\* `EVOLUCAO = 2` ou `EVOLUCAO = 3`.
 
-\- Denominador: `EVOLUCAO = 1`, `EVOLUCAO = 2` ou `EVOLUCAO = 3`.
+\- \*\*Denominador:\*\* `EVOLUCAO = 1`, `EVOLUCAO = 2` ou `EVOLUCAO = 3`.
 
 
 
@@ -809,4 +805,6 @@ Outras limitações importantes:
 
 
 \*\*Repositório:\*\* \[vitorturcisn/indiciumai-healthcare-ai-poc](https://github.com/vitorturcisn/indiciumai-healthcare-ai-poc)
+
+
 
