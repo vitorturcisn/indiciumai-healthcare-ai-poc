@@ -114,7 +114,7 @@ def draw_diagram(output: Path = OUTPUT) -> Path:
 
     tool_y, tool_h = 342, 128
     tool_boxes = [
-        (45, 325, "Tool 1 - consultar_metricas", ["Consultas SELECT; agregados e denominadores", "mortalidade / UTI / VACINA_COV", "atraso P90 e qualidade dos dados", "duplicidades após minimização"], BLUE),
+        (45, 325, "Tool 1 - consultar_metricas", ["Conexões somente leitura; agregados", "mortalidade / UTI / VACINA_COV", "atraso P90 e qualidade dos dados", "duplicidades após minimização"], BLUE),
         (433, 325, "Tool 2 - gerar_graficos", ["série diária dos últimos 30 dias", "série mensal dos últimos 12 meses", "dias/meses ausentes preenchidos com zero", "último mês parcial identificado"], BLUE),
         (821, 325, "Tool 3 - buscar_noticias", ["DDGS com backends limitados e paralelismo", "allowlist: gov.br / fiocruz.br / who.int", "extração HTML/PDF com limites de tamanho", "texto normalizado e trechos rastreáveis", "snippet marcado quando extração falha"], GREEN),
     ]
@@ -144,7 +144,7 @@ def draw_diagram(output: Path = OUTPUT) -> Path:
         (250, 214, "Pandas - ingestão e limpeza", ["parse explícito de datas brasileiras/ISO", "validação dos códigos de domínio", "minimização para campos analíticos", "DT_SIN_PRI com fallback DT_NOTIFIC"], YELLOW),
         (494, 202, "SQLite analítico", ["apenas registros minimizados", "consultas agregadas para as tools", "sem linhas individuais no prompt"], BLUE),
         (728, 216, "Fontes institucionais", ["Ministério da Saúde / InfoGripe", "Fiocruz e OMS quando pertinentes", "links e conteúdo de fonte verificados"], GREEN),
-        (974, 186, "Audit Log JSONL", ["prompts/respostas e hashes", "tools, validações e tentativas", "tokens quando disponíveis; status final"], PURPLE),
+        (974, 186, "Audit Log JSONL", ["hashes e tamanhos de prompts/respostas", "tools, validações e tentativas", "tokens quando disponíveis; status final"], PURPLE),
     ]
     for x, w, title, body, fill in data_boxes:
         draw_box(c, x, data_y, w, data_h, title, body, fill, title_size=8, body_size=7)

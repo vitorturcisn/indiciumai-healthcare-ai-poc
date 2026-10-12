@@ -20,6 +20,7 @@ dependencies = [
 [project.optional-dependencies]
 test = ["pytest>=8,<10"]
 diagram = ["reportlab>=4,<6"]
+lint = ["ruff>=0.11,<1"]
 
 [project.scripts]
 srag-poc = "srag_poc.main:main"
@@ -30,3 +31,9 @@ where = ["src"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]

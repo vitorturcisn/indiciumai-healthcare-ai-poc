@@ -15,7 +15,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 
 from . import __version__
 from .agent import build_agent
-from .audit import AuditLogger, sha256_text
+from .audit import AuditLogger, sha256_file, sha256_text
 from .config import AUDIT_PATH, DB_PATH, MODEL_NAME, OUTPUT_DIR, REPORT_PATH
 from .guardrails import validate_user_request
 from .ingestion import load_and_clean_csvs, write_database
@@ -36,7 +36,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     run_id = uuid.uuid4().hex
-    audit = AuditLogger(AUDIT_PATH, run_id)
+    audit = AuditLogger(AUDIT_PATH, run_id, model=args.model)
     audit.append("run_started", {
         "app_version": __version__,
         "model": args.model,
@@ -58,11 +58,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         if missing:
             raise FileNotFoundError("CSV(s) não encontrado(s): " + ", ".join(missing))
 
+        audit.append(
+            "input_files_validated",
+            {
+                "files": [
+                    {
+                        "filename": path.name,
+                        "size_bytes": path.stat().st_size,
+                        "sha256": sha256_file(path),
+                    }
+                    for path in csv_paths
+                ]
+            },
+        )
+
         logger.info("Carregando e minimizando %d arquivo(s) CSV.", len(csv_paths))
         frame, quality = load_and_clean_csvs(csv_paths)
         write_database(frame, DB_PATH, quality)
         audit.append("data_prepared", {
-            "database_path": str(DB_PATH),
+            "database_file": Path(DB_PATH).name,
             "rows_after_cleaning": int(len(frame)),
             "quality_summary": quality,
         })
@@ -105,7 +119,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         REPORT_PATH.write_text(final_report, encoding="utf-8")
         audit.append("run_succeeded", {
-            "report_path": str(REPORT_PATH),
+            "report_file": Path(REPORT_PATH).name,
             "report_sha256": sha256_text(final_report),
             "validation": validation,
             "tool_call_count": result.get("tool_call_count"),
@@ -115,9 +129,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     except Exception as exc:
-        logger.exception("Falha na execução %s", run_id)
-        audit.append("run_failed", {"error_type": type(exc).__name__, "error_message": str(exc)[:1000]})
-        print(f"Falha: {type(exc).__name__}: {exc}", file=sys.stderr)
+        logger.error("Falha na execução %s (%s)", run_id, type(exc).__name__)
+        audit.append("run_failed", {"error_type": type(exc).__name__})
+        print(f"Falha na execução: {type(exc).__name__}", file=sys.stderr)
         return 1
 
 

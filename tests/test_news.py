@@ -1,4 +1,6 @@
 from datetime import date
+from email.message import Message
+from io import BytesIO
 import sys
 from types import SimpleNamespace
 
@@ -408,3 +410,38 @@ def test_search_uses_bounded_ddgs_backend_and_timeout(monkeypatch):
     assert len(instances[0].calls) == len(news.NATIONAL_QUERIES)
     assert all(call["backend"] == news.DDGS_BACKEND_ORDER for call in instances[0].calls)
     assert all(call["max_results"] <= 5 for call in instances[0].calls)
+
+
+def test_redirect_handler_blocks_untrusted_target_before_following():
+    handler = news._AllowlistedRedirectHandler()
+    request = news.Request("https://www.gov.br/saude/noticia")
+
+    with pytest.raises(news.HTTPError) as exc_info:
+        handler.redirect_request(
+            request,
+            BytesIO(),
+            302,
+            "Found",
+            Message(),
+            "https://example.com/destino",
+        )
+
+    assert exc_info.value.code == 302
+    assert "Redirecionamento" in exc_info.value.msg
+
+
+def test_redirect_handler_accepts_allowlisted_relative_target():
+    handler = news._AllowlistedRedirectHandler()
+    request = news.Request("https://www.gov.br/saude/noticias")
+
+    redirected = handler.redirect_request(
+        request,
+        BytesIO(),
+        302,
+        "Found",
+        Message(),
+        "/saude/noticias/informe",
+    )
+
+    assert redirected is not None
+    assert redirected.full_url == "https://www.gov.br/saude/noticias/informe"

@@ -14,7 +14,7 @@ from langgraph.graph.message import add_messages
 
 from .audit import AuditLogger, sha256_text
 from .charts import generate_charts
-from .config import MAX_TOOL_CALLS, MODEL_NAME, OUTPUT_DIR, SOURCE_DATASET_URL
+from .config import MAX_TOOL_CALLS, SOURCE_DATASET_URL
 from .guardrails import validate_report, validate_user_request
 from .metrics import calculate_metrics
 from .news import search_national_news
@@ -111,23 +111,53 @@ class AgentState(TypedDict, total=False):
 
 
 def _message_snapshot(messages: list[AnyMessage]) -> list[dict[str, Any]]:
-    snapshot = []
+    """Registra metadados e hashes, sem persistir o conteúdo das mensagens."""
+    snapshot: list[dict[str, Any]] = []
+
     for message in messages:
+        raw_content = message.content
+        content_text = (
+            raw_content
+            if isinstance(raw_content, str)
+            else json.dumps(raw_content, ensure_ascii=False, default=str)
+        )
+
         item: dict[str, Any] = {
             "role": getattr(message, "type", type(message).__name__),
-            "content": message.content if isinstance(message.content, (str, list, dict)) else str(message.content),
+            "content_sha256": sha256_text(content_text),
+            "content_length": len(content_text),
         }
-        calls = getattr(message, "tool_calls", None)
-        if calls:
-            item["tool_calls"] = calls
+
+        calls = getattr(message, "tool_calls", None) or []
+        safe_calls = []
+        for call in calls:
+            if not isinstance(call, dict):
+                continue
+            args = call.get("args") or {}
+            args_json = json.dumps(
+                args, ensure_ascii=False, sort_keys=True, default=str
+            )
+            safe_calls.append({
+                "name": str(call.get("name", "")),
+                "id": str(call.get("id", "")),
+                "args_sha256": sha256_text(args_json),
+                "args_length": len(args_json),
+                "arg_keys": sorted(str(key) for key in args)
+                if isinstance(args, dict) else [],
+            })
+        if safe_calls:
+            item["tool_calls"] = safe_calls
+
         tool_call_id = getattr(message, "tool_call_id", None)
         if tool_call_id:
             item["tool_call_id"] = tool_call_id
         snapshot.append(item)
+
     return snapshot
 
 
 def _tool_result_summary(tool_name: str, result: Any) -> dict[str, Any]:
+    """Retorna somente metadados agregados e hashes de texto externo."""
     if not isinstance(result, dict):
         return {"result_type": type(result).__name__}
     if tool_name == "buscar_noticias":
@@ -135,19 +165,32 @@ def _tool_result_summary(tool_name: str, result: Any) -> dict[str, Any]:
             "status": result.get("status"),
             "sources": [
                 {
-                    "titulo": item.get("titulo"),
+                    "titulo_sha256": sha256_text(str(item.get("titulo") or "")),
                     "url": item.get("url"),
                     "publicado_em": item.get("publicado_em"),
                     "conteudo_extraido": item.get("conteudo_extraido"),
                     "status_conteudo": item.get("status_conteudo"),
                     "metodo_extracao": item.get("metodo_extracao"),
-                    "trechos_relevantes": (item.get("trechos_relevantes") or [])[:3],
+                    "evidence_passage_count": len(item.get("trechos_relevantes") or []),
+                    "evidence_sha256": sha256_text(json.dumps(
+                        item.get("trechos_relevantes") or [],
+                        ensure_ascii=False,
+                        default=str,
+                    )),
                 }
                 for item in result.get("results", [])
+                if isinstance(item, dict)
             ],
         }
     if tool_name == "gerar_graficos":
-        return {key: result.get(key) for key in ("status", "grafico_30_dias", "grafico_12_meses", "data_corte_graficos", "mes_final_parcial")}
+        return {
+            key: result.get(key)
+            for key in (
+                "status", "grafico_30_dias", "grafico_12_meses",
+                "data_corte_graficos", "mes_final_parcial",
+            )
+        }
+    # Metrics are deterministic aggregate values; no row-level records are returned.
     return result
 
 
@@ -254,7 +297,7 @@ def build_agent(llm: Any, db_path: Any, output_dir: Any, audit: AuditLogger):
         prompt_snapshot = _message_snapshot(prompt_messages)
         prompt_json = json.dumps(prompt_snapshot, ensure_ascii=False, default=str)
         audit.append("llm_call_started", {
-            "model": MODEL_NAME,
+            "model": audit.model,
             "finalization_mode": finalization_mode,
             "tool_call_count": previous_count,
             "prompt_sha256": sha256_text(prompt_json),
@@ -269,10 +312,10 @@ def build_agent(llm: Any, db_path: Any, output_dir: Any, audit: AuditLogger):
             "total_tokens": usage.get("total_tokens"),
         }
         audit.append("llm_call_finished", {
-            "model": MODEL_NAME,
+            "model": audit.model,
             "response_sha256": sha256_text(content),
-            "response_text": content,
-            "tool_calls_requested": getattr(response, "tool_calls", []),
+            "response_length": len(content),
+            "tool_calls_requested": _message_snapshot([response])[0].get("tool_calls", []),
             "token_usage": usage_record,
         })
         return {
@@ -294,7 +337,19 @@ def build_agent(llm: Any, db_path: Any, output_dir: Any, audit: AuditLogger):
             name = str(call.get("name", ""))
             arguments = call.get("args", {}) or {}
             call_id = str(call.get("id", "missing-call-id"))
-            audit.append("tool_call_started", {"tool": name, "tool_call_id": call_id, "arguments": arguments, "tool_call_count": tool_count})
+            arguments_json = json.dumps(
+                arguments, ensure_ascii=False, sort_keys=True, default=str
+            )
+            arguments_sha256 = sha256_text(arguments_json)
+            argument_keys = sorted(str(key) for key in arguments) if isinstance(arguments, dict) else []
+            audit.append("tool_call_started", {
+                "tool": name,
+                "tool_call_id": call_id,
+                "arguments_sha256": arguments_sha256,
+                "arguments_length": len(arguments_json),
+                "argument_keys": argument_keys,
+                "tool_call_count": tool_count,
+            })
 
             if tool_count >= MAX_TOOL_CALLS:
                 result: dict[str, Any] = {"status": "blocked", "message": f"Limite de {MAX_TOOL_CALLS} chamadas de ferramentas atingido."}
@@ -319,7 +374,14 @@ def build_agent(llm: Any, db_path: Any, output_dir: Any, audit: AuditLogger):
                     "result_sha256": sha256_text(json.dumps(result, ensure_ascii=False, default=str)),
                     "result_summary": summary,
                 })
-                event_history.append({"tool": name, "tool_call_id": call_id, "status": result.get("status", "success"), "arguments": arguments, "result_summary": summary})
+                event_history.append({
+                    "tool": name,
+                    "tool_call_id": call_id,
+                    "status": result.get("status", "success"),
+                    "arguments_sha256": arguments_sha256,
+                    "argument_keys": argument_keys,
+                    "result_summary": summary,
+                })
             except Exception as exc:
                 failure = {"status": "error", "error_type": type(exc).__name__, "message": "A ferramenta falhou. Não invente os dados ausentes."}
                 results[name] = failure
