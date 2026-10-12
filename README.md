@@ -14,8 +14,7 @@ Essa execução é uma evidência de referência do comportamento ponta a ponta 
 
 ### Suíte automatizada e integração contínua
 
-Após as últimas alterações de guardrails e métricas, a suíte automatizada foi executada localmente em **12/10/2026**, com o comando `python -m pytest -q`: **65 testes aprovados**, sem avisos de depreciação nessa execução.
-
+A suíte automatizada desta versão foi validada localmente com `python -m pytest -q`: **70 testes passaram**. A execução histórica de 65 testes corresponde à versão anterior às novas verificações de auditoria e segurança.
 O GitHub Actions também passou nos testes para **Python 3.10 e Python 3.12** após a integração das alterações à branch `main`. Consulte a [execução de CI no GitHub Actions](https://github.com/vitorturcisn/indiciumai-healthcare-ai-poc/actions/runs/38294629140).
 
 A suíte automatizada não requer chamadas reais à API do modelo ou aos mecanismos externos de busca. Uma nova validação ponta a ponta continua dependendo de credenciais válidas, conectividade e disponibilidade das fontes.
@@ -72,7 +71,7 @@ A disponibilidade de provedores de busca pode variar e alguns podem retornar err
 
 O guardrail de entrada bloqueia solicitações que tentem expor dados individuais ou identificadores. O validador de saída verifica seções e gráficos requeridos, números e percentuais com proveniência nos resultados das ferramentas, URLs permitidas e ressalvas metodológicas. Trata-se de uma barreira determinística de consistência, não de uma prova formal de correção semântica: a revisão humana continua necessária.
 
-`audit_log.jsonl` registra eventos por execução, incluindo chamadas de ferramentas e do LLM, hashes, snapshots de mensagens, respostas, status de validação, reparos e uso de tokens quando disponível. O log não deve receber linhas individuais da base. Como prompts e respostas podem conter informações da solicitação, revise e proteja os logs antes de compartilhá-los; não versione arquivos de auditoria gerados localmente.
+`audit_log.jsonl` registra eventos por execução, incluindo o modelo selecionado, hashes e comprimentos de prompts e respostas, metadados das ferramentas, validações, reparos e uso de tokens quando disponível. O conteúdo integral das mensagens e das respostas não é persistido na auditoria padrão. Os CSVs de entrada são identificados por nome, tamanho e SHA-256; seus conteúdos e caminhos absolutos não são copiados para o log. Não versione arquivos de auditoria gerados localmente.
 
 ## Requisitos e instalação
 
@@ -87,7 +86,7 @@ No Windows PowerShell, na raiz do projeto:
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-pip install -e ".[test]"
+pip install -e ".[test,diagram,lint]"
 $env:GOOGLE_API_KEY = Read-Host "Digite sua GOOGLE_API_KEY"
 ```
 
@@ -121,7 +120,7 @@ Execute:
 python -m pytest -q
 ```
 
-Na validação local de **12/10/2026**, foram aprovados **65 testes**. A execução da suíte não exige chamadas à API ou busca externa; a validação ponta a ponta requer credenciais e rede. A CI verifica Python 3.10 e 3.12 no GitHub Actions.
+Depois de aplicar as alterações, execute `python -m pytest -q` e atualize esta seção com a contagem real aprovada. A execução da suíte não exige chamadas à API ou busca externa; a validação ponta a ponta requer credenciais e rede. A CI verifica Python 3.10 e 3.12 no GitHub Actions.
 
 Arquivos cobertos:
 
@@ -130,10 +129,11 @@ Arquivos cobertos:
 - `test_news.py` - allowlist, extração HTML/PDF, normalização e limites da busca;
 - `test_guardrails.py` - entrada/saída, números, percentuais, URLs e evidências;
 - `test_agent_content.py` - requisitos de conteúdo do relatório;
-- `test_orchestration_audit.py` - tool calling, falhas e eventos de auditoria;
+- `test_orchestration_audit.py` - tool calling, falhas, hashes de auditoria e privacidade;
+- `test_database_readonly.py` - consultas somente leitura e bloqueio de criação acidental do banco;
 - `test_report_normalization.py` - normalizações determinísticas e regressões metodológicas.
 
-Para regenerar o diagrama PDF após editar `diagrama_arquitetura_v2.py`, instale `reportlab` no ambiente de desenvolvimento e execute:
+Para regenerar o diagrama PDF após editar `diagrama_arquitetura_v2.py`, instale a dependência opcional `diagram` com `python -m pip install -e ".[diagram]"` e execute:
 
 ```powershell
 python diagrama_arquitetura_v2.py

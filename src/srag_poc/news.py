@@ -14,9 +14,9 @@ from html.parser import HTMLParser
 import io
 import re
 from typing import Any
-from urllib.error import HTTPError, URLError
+from urllib.error import HTTPError
 from urllib.parse import urljoin, urlparse
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from .config import ALLOWED_NEWS_DOMAINS, MAX_NEWS_RESULTS, NEWS_TIME_LIMIT
 
@@ -270,7 +270,33 @@ class _InstitutionalLinksParser(HTMLParser):
         self._finish_item()
 
 
+class _AllowlistedRedirectHandler(HTTPRedirectHandler):
+    """Bloqueia destino não institucional antes de seguir o redirecionamento."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        target = urljoin(req.full_url, newurl)
+        if not allowed_url(target):
+            raise HTTPError(
+                req.full_url,
+                code,
+                "Redirecionamento para domínio não permitido",
+                headers,
+                fp,
+            )
+        return super().redirect_request(req, fp, code, msg, headers, target)
+
+
+def _open_allowlisted(request: Request, timeout: int):
+    """Abre URL institucional com validação prévia de cada redirecionamento."""
+    if not allowed_url(request.full_url):
+        raise ValueError("URL fora da allowlist institucional.")
+    opener = build_opener(_AllowlistedRedirectHandler())
+    return opener.open(request, timeout=timeout)
+
+
 def _fetch_html(url: str) -> str:
+    if not allowed_url(url):
+        raise ValueError("URL fora da allowlist institucional.")
     request = Request(
         url,
         headers={
@@ -279,7 +305,7 @@ def _fetch_html(url: str) -> str:
             "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.5",
         },
     )
-    with urlopen(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
+    with _open_allowlisted(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
         final_url = response.geturl()
         if not allowed_url(final_url):
             raise ValueError("Redirecionamento para domínio não permitido")
@@ -393,7 +419,7 @@ def _fetch_pdf_bytes(url: str) -> tuple[bytes, str]:
             "Accept": "application/pdf,application/octet-stream;q=0.9,*/*;q=0.5",
         },
     )
-    with urlopen(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
+    with _open_allowlisted(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
         final_url = response.geturl()
         payload = response.read(MAX_RESPONSE_BYTES + 1)
     if not allowed_url(final_url):

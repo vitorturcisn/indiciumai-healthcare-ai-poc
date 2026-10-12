@@ -91,8 +91,6 @@ def load_and_clean_csvs(paths: Iterable[Path]) -> tuple[pd.DataFrame, dict[str, 
         "variaveis": {},
     }
 
-    raw_notification = raw["DT_NOTIFIC"].copy()
-    raw_symptom = raw["DT_SIN_PRI"].copy()
     raw["DT_NOTIFIC"] = parse_brazilian_dates(raw["DT_NOTIFIC"])
     raw["DT_SIN_PRI"] = parse_brazilian_dates(raw["DT_SIN_PRI"])
 

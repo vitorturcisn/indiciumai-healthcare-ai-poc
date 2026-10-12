@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import math
-import sqlite3
-from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
 from .config import SOURCE_DATASET_URL
+from .database import read_only_connection
 
 
 def _pct(numerator: int, denominator: int) -> float | None:
@@ -22,7 +21,7 @@ def _fmt_pct(value: float | None) -> str:
 
 
 def _read_cases(db_path: Path) -> pd.DataFrame:
-    with sqlite3.connect(db_path) as connection:
+    with read_only_connection(db_path) as connection:
         frame = pd.read_sql_query("SELECT * FROM casos_srag", connection)
 
     for column in ("DATA_REFERENCIA", "DT_NOTIFIC", "DT_SIN_PRI"):

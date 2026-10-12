@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -11,11 +10,13 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
 
+from .database import read_only_connection
+
 
 def generate_charts(db_path: Path, output_dir: Path) -> dict[str, Any]:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(db_path) as connection:
+    with read_only_connection(db_path) as connection:
         df = pd.read_sql_query("SELECT DATA_REFERENCIA, ORIGEM_DATA_REFERENCIA FROM casos_srag", connection)
     if df.empty:
         raise ValueError("Sem dados para gerar gráficos.")
