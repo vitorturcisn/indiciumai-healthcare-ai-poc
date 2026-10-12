@@ -1,404 +1,136 @@
-# Indicium HealthCare — SRAG AI PoC
+# Indicium HealthCare - PoC de monitoramento epidemiológico de SRAG
 
-Prova de conceito de **Inteligência Artificial Generativa para monitoramento epidemiológico da Síndrome Respiratória Aguda Grave (SRAG)**, utilizando dados públicos do DATASUS, métricas epidemiológicas, gráficos e notícias de fontes institucionais.
+PoC modular de IA generativa para analisar indicadores agregados de Síndrome Respiratória Aguda Grave (SRAG), gerar gráficos e acrescentar contexto de fontes institucionais. Esta versão incorpora a remediação dos feedbacks de validação: limpeza e minimização de dados, tratamento explícito de datas e códigos epidemiológicos, extração de conteúdo HTML/PDF, tool calling real, guardrails de proveniência e auditoria por evento.
 
-A solução combina Python, SQLite, Pandas, LangGraph e Google Gemini para automatizar a geração de relatórios epidemiológicos agregados, com mecanismos de minimização de dados, validação de resultados, controle das ferramentas e auditoria das execuções.
+> **Escopo:** ferramenta de análise agregada e apoio à vigilância, não é sistema de diagnóstico, prognóstico individual ou decisão clínica. Os resultados dependem do snapshot de dados e da disponibilidade das fontes externas.
 
-O projeto foi desenvolvido para avaliar a viabilidade de uma solução que ajude profissionais da saúde a interpretar indicadores epidemiológicos e contextualizá-los com informações externas recentes.
+## Status da validação local
 
-> **Escopo da PoC:** esta solução é experimental e não substitui a análise epidemiológica profissional. Não deve ser utilizada para diagnóstico, prognóstico individual ou tomada de decisão clínica.
+Validação ponta a ponta executada em **12/10/2026**, usando `gemini-3.8-flash` e os snapshots `INFLUD25-28-09-2026.csv` e `INFLUD26-28-09-2026.csv`. A ingestão persistiu **557.361 registros minimizados**. A execução final terminou com código de saída `0`, produziu relatório e artefatos e foi aprovada pelo Output Validator.
 
-## 1. Objetivos do projeto
+Na execução aprovada foram registradas 3 chamadas ao LLM, 3 chamadas a ferramentas e duas validações do relatório. A primeira validação apontou números sem proveniência; o fluxo agendou uma tentativa de reparo e a segunda validação foi aprovada. Isso comprova o comportamento observado nessa execução, não garante que fontes ou modelos externos sempre estejam disponíveis.
 
-- Consultar dados públicos de internações por SRAG.
-- Tratar inconsistências e valores ausentes nos campos utilizados pela análise.
-- Calcular indicadores epidemiológicos com denominadores e limitações explicitados.
-- Gerar gráficos diários e mensais de casos.
-- Consultar fontes institucionais para buscar informações relacionadas ao cenário nacional de SRAG.
-- Utilizar um agente de IA generativa para orquestrar ferramentas e produzir o relatório.
-- Validar a consistência numérica e a proveniência das URLs presentes na saída.
-- Registrar eventos de execução para auditoria e rastreabilidade.
-- Evitar o envio de registros individuais ao modelo de linguagem, trabalhando com dados agregados.
+Última suíte automatizada executada após a otimização da busca: **62 testes aprovados**. Foram reportados 186 `DeprecationWarning` relacionados ao tratamento de `Timedelta` em Pandas/NumPy; não foram falhas de teste. O diff de código foi verificado com `git diff --check`.
 
-## 2. Arquitetura da solução
+## Arquitetura
 
-O sistema utiliza uma arquitetura modular, separando ingestão, tratamento dos dados, cálculo de métricas, visualização, busca de notícias, orquestração, validação e auditoria.
+Consulte [`diagrama_arquitetura_v2.pdf`](diagrama_arquitetura_v2.pdf) para o fluxo de ingestão, ferramentas, normalização, validação e auditoria. O código é organizado em `src/srag_poc/`:
 
-O diagrama conceitual da arquitetura está disponível em [`diagrama_arquitetura_v2.pdf`](diagrama_arquitetura_v2.pdf).
+- `ingestion.py` e `dates.py`: leitura, validação e minimização dos CSVs;
+- `metrics.py`: indicadores agregados e metadados de qualidade;
+- `charts.py`: gráficos diários e mensais;
+- `news.py`: busca institucional, validação de URLs e extração segura de conteúdo HTML/PDF;
+- `agent.py`: LangGraph, chamadas reais de ferramentas, normalização determinística e reparo limitado do relatório;
+- `guardrails.py`: validação da solicitação e da saída;
+- `audit.py`: log JSONL por evento;
+- `config.py` e `main.py`: parâmetros e interface de linha de comando.
 
-### Fluxo de execução
+### Fluxo principal
 
-1. **Entrada:** o usuário solicita a geração de um relatório por meio da interface de linha de comando (CLI).
-2. **Input Guardrail:** a solicitação é validada antes da leitura dos dados e da chamada aos serviços externos.
-3. **Ingestão e qualidade:** os CSVs do DATASUS são carregados, as datas são normalizadas, os domínios são tratados e os dados são minimizados.
-4. **Persistência:** os dados analíticos são armazenados em um banco SQLite local.
-5. **Agente:** o LangGraph coordena o modelo Gemini e as ferramentas disponíveis por meio de tool calling.
-6. **Ferramentas:** o agente pode consultar métricas, gerar gráficos e buscar notícias institucionais.
-7. **Output Validator:** o relatório é verificado quanto à estrutura, à coerência numérica e à proveniência das URLs.
-8. **Saída e auditoria:** o relatório, os gráficos, o resumo de qualidade e os eventos da execução são registrados localmente.
+1. A solicitação passa pelo guardrail de entrada antes da ingestão ou das chamadas externas.
+2. Pandas interpreta datas e códigos, descarta datas obrigatórias inválidas e reduz os dados aos campos analíticos necessários.
+3. SQLite armazena os registros minimizados. As ferramentas disponibilizam ao LLM agregados e metadados, não linhas individuais.
+4. LangGraph encaminha chamadas reais do Gemini a `consultar_metricas`, `gerar_graficos` e `buscar_noticias`, respeitando o limite de chamadas.
+5. O sistema aplica normalizações determinísticas, executa o Output Validator e, quando configurado, permite uma tentativa limitada de reparo.
+6. Relatório, gráficos, qualidade e eventos de auditoria são gravados nos diretórios de saída configurados.
 
-### Ferramentas do agente
+## Dados e semântica das métricas
 
-| Ferramenta | Responsabilidade |
+O snapshot é obtido no [Portal de Dados Abertos do SUS - SRAG 2019 a 2026](https://dadosabertos.saude.gov.br/dataset/srag-2019-a-2026). A PoC minimiza os campos analíticos para `DT_NOTIFIC`, `DT_SIN_PRI`, `UTI`, `EVOLUCAO` e `VACINA_COV`, além de datas e metadados derivados necessários à análise.
+
+| Indicador | Definição e limite de interpretação |
 |---|---|
-| `consultar_metricas` | Consultar os indicadores epidemiológicos calculados a partir do SQLite. |
-| `gerar_graficos` | Produzir as séries temporais de casos diários e mensais. |
-| `buscar_noticias` | Buscar conteúdos de fontes institucionais relacionados à SRAG e a vírus respiratórios. |
+| Variação de casos | Compara duas janelas de 30 dias antes do corte calculado para mitigar atraso de notificação. É variação de contagens notificadas, não de incidência populacional. |
+| Mortalidade por qualquer causa entre desfechos conhecidos | Numerador: `EVOLUCAO=2` e `EVOLUCAO=3`. Denominador: `EVOLUCAO=1`, `EVOLUCAO=2` e `EVOLUCAO=3`. `EVOLUCAO=3` é óbito por outras causas; não se deve apresentar o indicador como mortalidade atribuída exclusivamente à SRAG. |
+| Proporção em UTI | `UTI=1` sobre casos com `UTI=1` ou `UTI=2` conhecido. Não representa ocupação de leitos, que exige dados de capacidade e uso de leitos. |
+| Vacina registrada | `VACINA_COV=1` sobre `VACINA_COV=1` ou `VACINA_COV=2` conhecido. Refere-se à vacinação contra COVID-19 registrada entre casos notificados de SRAG, não à cobertura vacinal populacional. |
+| Duplicidades exatas após minimização | Coincidências exatas nas colunas analíticas minimizadas. Não comprovam pacientes ou notificações duplicados, pois não há identificador individual unívoco nessa etapa. |
 
-As consultas analíticas são executadas por funções controladas, e não por SQL livre gerado pelo modelo. O agente tem um limite configurável de chamadas às ferramentas, definido por `MAX_TOOL_CALLS`, cujo padrão é seis.
+Datas `dd/mm/aaaa` são interpretadas explicitamente como dia/mês/ano; datas ISO são aceitas. `DT_SIN_PRI` é priorizada como referência epidemiológica quando válida, com fallback documentado para `DT_NOTIFIC`. O percentil 90 do atraso de notificação só é estimado quando há amostra válida suficiente; sem isso, a variação pode ser `N/A`, em vez de assumir um atraso.
 
-## 3. Estrutura do repositório
+Os gráficos representam contagens diárias dos últimos 30 dias e mensais dos últimos 12 meses, preenchendo períodos sem registros com zero e identificando o último mês parcial.
 
-```text
-.
-├── README.md
-├── .gitignore
-├── pyproject.toml
-├── requirements.txt
-├── diagrama_arquitetura_v2.pdf
-├── diagrama_arquitetura_v2.py
-├── src/
-│   └── srag_poc/
-│       ├── __init__.py
-│       ├── config.py
-│       ├── dates.py
-│       ├── ingestion.py
-│       ├── metrics.py
-│       ├── charts.py
-│       ├── news.py
-│       ├── guardrails.py
-│       ├── audit.py
-│       ├── agent.py
-│       └── main.py
-└── tests/
-    ├── test_agent_content.py
-    ├── test_dates_and_ingestion.py
-    ├── test_dates_iso_regression.py
-    ├── test_guardrails.py
-    ├── test_metrics.py
-    └── test_news.py
-```
+## Busca e evidências de notícias
 
-### Principais módulos
+A ferramenta pesquisa fontes institucionais nacionais e aplica uma allowlist de hostnames para `gov.br`, `fiocruz.br` e `who.int`. Resultados externos são tratados como dados não confiáveis, nunca como instruções.
 
-- `config.py`: configurações, modelo utilizado, caminhos de saída e limites da aplicação.
-- `dates.py`: interpretação explícita de datas brasileiras e ISO.
-- `ingestion.py`: leitura, limpeza, minimização, avaliação da qualidade e persistência dos dados.
-- `metrics.py`: cálculos reproduzíveis dos indicadores epidemiológicos.
-- `charts.py`: geração dos gráficos de séries temporais.
-- `news.py`: busca de conteúdos institucionais e validação de URLs.
-- `guardrails.py`: validação da solicitação e do relatório gerado.
-- `audit.py`: registro estruturado dos eventos da execução.
-- `agent.py`: ferramentas, estado e orquestração do agente.
-- `main.py`: ponto de entrada da aplicação.
+Quando uma fonte é selecionada, a ferramenta tenta recuperar conteúdo HTML ou PDF com limites de tamanho e páginas, normaliza quebras de linha e seleciona trechos relevantes. O resultado mantém URL e método de extração; quando o conteúdo integral não é obtido, a limitação a snippet deve ser explícita. Números e tendências de notícias não devem ser apresentados como métricas calculadas a partir do snapshot local.
 
-## 4. Tecnologias utilizadas
+A disponibilidade de provedores de busca pode variar e alguns podem retornar erros ou limites de taxa. Uma falha de fonte deve ser auditada e não pode ser interpretada como ausência de risco epidemiológico.
 
-| Tecnologia | Aplicação |
-|---|---|
-| Python | Linguagem principal e implementação da solução |
-| Pandas | Leitura, transformação e análise dos dados |
-| SQLite | Persistência local dos dados analíticos |
-| Matplotlib | Geração dos gráficos |
-| LangGraph | Orquestração do fluxo do agente |
-| LangChain | Integração entre o modelo e as ferramentas |
-| Google Gemini | Geração de texto e seleção de ferramentas |
-| DDGS | Busca de conteúdos externos |
-| Pytest | Testes automatizados |
-| ReportLab | Geração programática do diagrama em PDF |
+## Guardrails e auditoria
 
-O modelo padrão configurado no projeto é `gemini-3.8-flash`. Ele pode ser alterado por meio da opção `--model` ou da variável de ambiente `GEMINI_MODEL`. Consulte a [documentação oficial dos modelos Gemini](https://ai.google.dev/gemini-api/docs/models) e verifique quais modelos habilitados para sua chave suportam function calling.
+O guardrail de entrada bloqueia solicitações que tentem expor dados individuais ou identificadores. O validador de saída verifica seções e gráficos requeridos, números e percentuais com proveniência nos resultados das ferramentas, URLs permitidas e ressalvas metodológicas. Trata-se de uma barreira determinística de consistência, não de uma prova formal de correção semântica: a revisão humana continua necessária.
 
-## 5. Dados e fontes
+`audit_log.jsonl` registra, por execução, eventos de início/fim/erro de tools e chamadas ao LLM, IDs, hashes, snapshots das mensagens, respostas, status de validação, reparos e uso de tokens quando disponível. O log não deve receber linhas individuais da base; mantenha prompts e solicitações somente agregados e revise os logs antes de compartilhá-los.
 
-### Conjunto de dados
+## Requisitos e instalação
 
-A solução utiliza arquivos CSV públicos de internações por SRAG do sistema SIVEP-Gripe, disponibilizados pelo DATASUS.
+- Python 3.10 ou superior;
+- chave Google Gemini (`GOOGLE_API_KEY`);
+- snapshots CSV usados na execução;
+- rede e disponibilidade do modelo/provedor para execução ponta a ponta.
 
-Fontes:
-
-- [Conjunto de dados SRAG — Dados Abertos do Ministério da Saúde](https://dadosabertos.saude.gov.br/dataset/srag-2019-a-2026)
-- [Conjunto SRAG 2021–2024 — OpenDataSUS](https://opendatasus.saude.gov.br/dataset/srag-2021-a-2024)
-- [Dicionário de dados SRAG/SIVEP-Gripe](https://opendatasus.saude.gov.br/dataset/srag-2021-a-2024/resource/3135ac9c-2019-4989-a893-2ed50ebd8e68)
-
-Os arquivos de origem não são armazenados no GitHub. Para executar a aplicação, baixe os snapshots desejados e coloque-os na pasta local `data/`.
-
-### Fontes externas de notícias
-
-A ferramenta de notícias prioriza fontes institucionais e utiliza uma lista de domínios permitidos:
-
-- Ministério da Saúde e outros conteúdos em `gov.br`;
-- Fundação Oswaldo Cruz e conteúdos em `fiocruz.br`;
-- Organização Mundial da Saúde e conteúdos em `who.int`.
-
-As URLs precisam ser HTTPS e pertencer aos domínios autorizados. O fallback institucional prioriza itens com relevância para o tema e data de publicação verificável.
-
-A ausência de resultados na busca **não significa ausência de surtos ou de risco epidemiológico**.
-
-## 6. Tratamento, minimização e qualidade dos dados
-
-Os arquivos do DATASUS podem apresentar valores ausentes, formatos de data diferentes, códigos inválidos e registros inconsistentes. Por isso, a ingestão aplica regras explícitas antes de persistir os dados.
-
-### Campos utilizados
-
-| Campo | Significado | Tratamento |
-|---|---|---|
-| `DT_NOTIFIC` | Data da notificação | Obrigatória. Registros sem data válida são excluídos e contabilizados. |
-| `DT_SIN_PRI` | Data dos primeiros sintomas | Opcional. Utilizada como referência epidemiológica quando válida. |
-| `UTI` | Informação sobre internação em UTI | São considerados os códigos `1`, `2` e `9`; códigos inválidos são convertidos em nulos. |
-| `EVOLUCAO` | Evolução do caso | São considerados os códigos `1`, `2`, `3` e `9`; códigos inválidos são convertidos em nulos. |
-| `VACINA_COV` | Registro de vacinação contra COVID-19 | São considerados os códigos `1`, `2` e `9`; códigos inválidos são convertidos em nulos. |
-
-A base mantém os cinco campos de origem acima e campos derivados para análise temporal e rastreabilidade, como `DATA_REFERENCIA`, `ORIGEM_DATA_REFERENCIA` e `ATRASO_NOTIFICACAO_DIAS`.
-
-Município, idade, sexo e identificadores individuais não fazem parte da base analítica minimizada utilizada pelo agente. O modelo recebe resultados agregados das ferramentas, e não linhas individuais do dataset.
-
-### Tratamento das datas
-
-A leitura de datas diferencia explicitamente o formato brasileiro `dd/mm/aaaa` dos formatos ISO, incluindo timestamps ISO. Isso evita inverter mês e dia ao interpretar datas.
-
-A definição da data de referência segue as regras:
-
-1. Usar `DT_SIN_PRI` quando for válida.
-2. Descartar `DT_SIN_PRI` como referência quando estiver ausente, inválida ou for posterior à notificação.
-3. Utilizar `DT_NOTIFIC` como fallback quando a data dos sintomas não puder ser utilizada.
-
-O relatório registra o período observado e ressalta a possibilidade de subnotificação e revisão dos dados recentes.
-
-### Domínios dos campos
-
-| Campo | Códigos aceitos | Interpretação |
-|---|---|---|
-| `UTI` | `1`, `2`, `9` | Sim, não, ignorado/desconhecido |
-| `EVOLUCAO` | `1`, `2`, `3`, `9` | Cura, óbito, óbito por outras causas, ignorado/desconhecido |
-| `VACINA_COV` | `1`, `2`, `9` | Sim, não, ignorado/desconhecido |
-
-O código `9` é mantido como desconhecido e excluído do denominador dos indicadores que exigem informação conhecida. Códigos fora do domínio e valores malformados são convertidos em nulos e contabilizados no relatório de qualidade.
-
-A solução também registra a quantidade de duplicidades exatas na base minimizada. Essa contagem não confirma duplicações de pacientes ou notificações: como os identificadores individuais não são mantidos, registros iguais nos campos analíticos não são suficientes para provar duplicidade real. Por isso, a solução não remove essas linhas automaticamente.
-
-## 7. Métricas epidemiológicas
-
-### Variação de casos
-
-Compara a quantidade de casos em duas janelas consecutivas de 30 dias: a janela recente e a janela anterior. A comparação respeita um corte temporal que procura reduzir o viés de atraso de notificação.
-
-O atraso é estimado pelo percentil 90 (P90) dos atrasos válidos entre `DT_SIN_PRI` e `DT_NOTIFIC`, considerando notificações dos últimos 180 dias e pelo menos 30 observações válidas.
-
-Quando não há amostra suficiente para estimar o atraso, ou a janela de comparação não é completa, a variação é apresentada como `N/A`, em vez de assumir um atraso arbitrário.
-
-### Mortalidade entre desfechos conhecidos
-
-A métrica é definida como a proporção de óbitos por qualquer causa entre os registros com desfecho conhecido:
-
-- **Numerador:** `EVOLUCAO = 2` ou `EVOLUCAO = 3`.
-- **Denominador:** `EVOLUCAO = 1`, `EVOLUCAO = 2` ou `EVOLUCAO = 3`.
-
-O código `EVOLUCAO = 3` corresponde a óbito por outras causas e é apresentado separadamente do código `2`. Essa métrica não deve ser interpretada automaticamente como letalidade exclusivamente por SRAG.
-
-### Indicador de internação em UTI
-
-É calculado como a proporção de registros com `UTI = 1` entre os registros com informação conhecida (`UTI = 1` ou `UTI = 2`).
-
-Esse indicador representa internação em UTI entre casos de SRAG com informação disponível. **Não representa a taxa de ocupação dos leitos hospitalares**, pois a base não oferece todos os elementos necessários para calcular ocupação real.
-
-### Indicador de vacinação contra COVID-19 registrada
-
-É calculado como a proporção de registros com `VACINA_COV = 1` entre aqueles com informação vacinal conhecida (`VACINA_COV = 1` ou `VACINA_COV = 2`).
-
-O indicador representa vacinação contra COVID-19 documentada entre os casos de SRAG. **Não representa a cobertura vacinal da população brasileira**, pois o conjunto de dados não fornece o denominador populacional apropriado.
-
-### Qualidade e completude
-
-O relatório apresenta a completude dos campos de UTI, evolução e vacinação, além das contagens de valores desconhecidos, inválidos e duplicidades exatas na base minimizada.
-
-Todos os indicadores devem ser interpretados considerando seus denominadores, os registros excluídos e as limitações da base.
-
-## 8. Gráficos
-
-O relatório inclui os dois gráficos exigidos pelo desafio:
-
-- **Casos diários dos últimos 30 dias**, com tratamento dos dias sem registros.
-- **Casos mensais dos últimos 12 meses**, com indicação de que o período mensal mais recente pode estar incompleto.
-
-Os gráficos são gerados a partir das séries agregadas, com títulos e eixos identificados.
-
-## 9. Agente, guardrails e auditoria
-
-### Orquestração
-
-O agente utiliza LangGraph e integração com o Gemini para selecionar e solicitar ferramentas. As chamadas são encaminhadas pela aplicação, e seus resultados retornam ao fluxo de geração do relatório.
-
-O número máximo de chamadas às ferramentas pode ser ajustado pela variável `MAX_TOOL_CALLS`. O limite reduz o risco de ciclos excessivos de execução.
-
-### Validação da saída
-
-O Output Validator verifica elementos como:
-
-- Presença das seções e dos gráficos obrigatórios.
-- Coerência de números e percentuais com os resultados das ferramentas.
-- Proveniência das URLs utilizadas.
-- Atendimento às condições mínimas de estrutura do relatório.
-
-Essa validação reduz o risco de números ou links sem suporte nos resultados disponíveis, mas não garante a veracidade semântica de todas as afirmações. A revisão humana continua necessária.
-
-### Auditoria
-
-A execução registra eventos em formato JSONL, incluindo informações como identificador da execução, versão da aplicação, modelo utilizado, eventos de ferramentas e do LLM, status da validação e hashes de conteúdo. O registro de tokens depende das informações disponibilizadas pelo provedor.
-
-O arquivo de auditoria pode conter conteúdo de solicitações e respostas. Ele deve permanecer local e não ser compartilhado publicamente sem revisão. Não inclua dados individuais ou informações confidenciais nas solicitações do agente.
-
-### Limitações dos guardrails
-
-Guardrails baseados em padrões, allowlists e validações determinísticas reduzem riscos, mas não garantem que o modelo nunca produza conteúdo incorreto. A validação de proveniência comprova correspondência com resultados registrados, não necessariamente que uma interpretação epidemiológica esteja correta.
-
-## 10. Instalação e execução local
-
-### Pré-requisitos
-
-- Python 3.10 ou superior.
-- Git.
-- Uma chave de API do Google AI Studio.
-- Arquivos CSV válidos do DATASUS.
-- Acesso à internet para a integração com o Gemini e a busca externa de notícias.
-
-### 10.1. Clonar o repositório
-
-```bash
-git clone https://github.com/vitorturcisn/indiciumai-healthcare-ai-poc.git
-cd indiciumai-healthcare-ai-poc
-```
-
-### 10.2. Criar o ambiente virtual
-
-```bash
-python -m venv .venv
-```
-
-No Windows PowerShell:
+Windows PowerShell, na raiz do projeto:
 
 ```powershell
+python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 pip install -e ".[test]"
+$env:GOOGLE_API_KEY = Read-Host "Digite sua GOOGLE_API_KEY"
 ```
 
-No Linux/macOS:
+Não grave a chave em código ou em arquivos versionados. Configure-a apenas na sessão local ou pelo gerenciador de segredos utilizado no ambiente.
 
-```bash
-source .venv/bin/activate
-python -m pip install --upgrade pip
-pip install -e ".[test]"
-```
+## Executar a PoC
 
-### 10.3. Configurar a chave de API
-
-No Windows PowerShell, configure a chave somente na sessão atual:
+Os nomes abaixo correspondem ao snapshot usado na validação de referência; adapte-os aos arquivos disponíveis localmente. Os CSVs são ignorados pelo Git e não devem ser versionados.
 
 ```powershell
-$secureKey = Read-Host "Digite sua GOOGLE_API_KEY" -AsSecureString
-$env:GOOGLE_API_KEY = [System.Net.NetworkCredential]::new("", $secureKey).Password
-```
-
-No Linux/macOS:
-
-```bash
-read -s -p "Digite sua GOOGLE_API_KEY: " GOOGLE_API_KEY
-echo
-export GOOGLE_API_KEY
-```
-
-A chave não deve ser escrita diretamente no código ou no README, nem incluída em commits. O `.gitignore` exclui arquivos de ambiente e outros arquivos comuns de credenciais.
-
-### 10.4. Disponibilizar os arquivos CSV
-
-Crie a pasta `data/` caso não exista e coloque nela os CSVs baixados do DATASUS.
-
-Exemplo de arquivos locais:
-
-```text
-data/
-├── INFLUD25-28-09-2026.csv
-└── INFLUD26-28-09-2026.csv
-```
-
-Os nomes acima são exemplos dos snapshots utilizados no ambiente de desenvolvimento. Utilize os nomes reais dos arquivos que você baixou, sem pressupor que novos snapshots terão a mesma data ou estrutura.
-
-A pasta `data/` é local e os arquivos brutos são excluídos do versionamento.
-
-### 10.5. Executar a aplicação
-
-O comando aceita uma ou mais opções `--csv`, uma para cada arquivo:
-
-```powershell
-$env:GEMINI_MODEL = "gemini-3.8-flash"
-
 python -m srag_poc.main `
-  --csv data/INFLUD25-28-09-2026.csv `
-  --csv data/INFLUD26-28-09-2026.csv `
-  --request "Gere o relatório nacional agregado de SRAG com métricas, gráficos e contexto institucional recente."
+    --csv ".\data\INFLUD25-28-09-2026.csv" `
+    --csv ".\data\INFLUD26-28-09-2026.csv"
 ```
 
-Se os nomes dos arquivos forem diferentes, substitua os caminhos pelos nomes disponíveis localmente.
+O modelo padrão é `gemini-3.8-flash`. Para trocar o modelo, use `--model` ou defina `GEMINI_MODEL`. A saída padrão é `outputs/`; também pode ser isolada com `SRAG_OUTPUT_DIR`. O banco, relatórios, imagens e logs gerados não devem ser versionados.
 
-A execução completa depende de uma chave válida, acesso à internet, disponibilidade dos serviços externos e suporte a tool calling no modelo escolhido. A primeira execução pode consumir chamadas de API.
+Artefatos gerados:
 
-### 10.6. Artefatos gerados
+- `relatorio_final.md` - relatório epidemiológico;
+- `grafico_30_dias.png` e `grafico_12_meses.png` - séries de contagens;
+- `qualidade_dados.json` - completude e metadados da limpeza;
+- `srag_dados.db` - banco SQLite minimizado;
+- `audit_log.jsonl` - auditoria por evento.
 
-A aplicação utiliza a pasta `outputs/` como diretório padrão para arquivos gerados:
+## Testes automatizados
 
-| Arquivo | Descrição |
-|---|---|
-| `srag_dados.db` | Banco SQLite com dados analíticos minimizados e metadados |
-| `qualidade_dados.json` | Resumo do tratamento, qualidade e cobertura temporal |
-| `grafico_30_dias.png` | Gráfico diário de casos |
-| `grafico_12_meses.png` | Gráfico mensal de casos |
-| `relatorio_final.md` | Relatório epidemiológico em Markdown |
-| `audit_log.jsonl` | Eventos de auditoria da execução |
+Execute:
 
-Esses artefatos permanecem locais por padrão e não devem ser publicados indiscriminadamente no repositório.
-
-## 11. Testes automatizados
-
-Execute a suíte de testes com:
-
-```bash
+```powershell
 python -m pytest -q
 ```
 
-Os testes cobrem a interpretação de datas, limpeza e ingestão, domínios dos campos, cálculo de métricas, guardrails, processamento do conteúdo do agente e busca de notícias.
+Os testes não precisam de chamada à API ou busca externa. A última execução local registrou 62 testes aprovados; a validação ponta a ponta requer credenciais e rede.
 
-Na execução local de 11/10/2026, foram aprovados **39 testes**. A execução também emitiu avisos de depreciação do NumPy/Pandas, que não impediram a aprovação, mas podem exigir manutenção futura.
+Arquivos cobertos:
 
-Os testes unitários são determinísticos e não precisam realizar chamadas ao Gemini ou à busca externa. Por isso, a aprovação dos testes não substitui uma execução completa do agente com credenciais e dados reais.
+- `test_dates_and_ingestion.py` e `test_dates_iso_regression.py` - datas, limpeza e minimização;
+- `test_metrics.py` - denominadores, desfechos, atraso e duplicidades após minimização;
+- `test_news.py` - allowlist, extração HTML/PDF, normalização e limites da busca;
+- `test_guardrails.py` - entrada/saída, números, percentuais, URLs e evidências;
+- `test_agent_content.py` - requisitos de conteúdo do relatório;
+- `test_orchestration_audit.py` - tool calling, falhas e eventos de auditoria;
+- `test_report_normalization.py` - normalizações determinísticas e regressões metodológicas.
 
-## 12. Estado atual e limitações conhecidas
+Para regenerar o diagrama PDF após editar `diagrama_arquitetura_v2.py`, instale `reportlab` no ambiente de desenvolvimento e execute `python diagrama_arquitetura_v2.py`.
 
-A versão atual foi publicada no GitHub com estrutura modular, ferramenta de busca institucional, guardrails, auditoria, métricas e testes automatizados.
+## Referências
 
-Na última execução completa registrada em 11/10/2026, as ferramentas de métricas, gráficos e notícias finalizaram com sucesso, e o validador aprovou o relatório após uma etapa de correção automática.
+- [Portal de Dados Abertos do SUS - SRAG 2019 a 2026](https://dadosabertos.saude.gov.br/dataset/srag-2019-a-2026)
+- [Dicionário de dados SRAG/SIVEP-Gripe](https://opendatasus.saude.gov.br/dataset/srag-2021-a-2024/resource/3135ac9c-2019-4989-a893-2ed50ebd8e68)
+- [Documentação de modelos Gemini](https://ai.google.dev/gemini-api/docs/models)
 
-Entretanto, ainda existe uma limitação relevante na parte de notícias: **a ferramenta consegue localizar fontes e registrar títulos, datas e URLs, mas o relatório ainda precisa sintetizar de forma consistente os achados epidemiológicos do conteúdo consultado e relacioná-los às métricas calculadas**.
+## Publicação e controle de versão
 
-Essa etapa é necessária para atender plenamente ao objetivo central do desafio: não apenas apresentar indicadores e fontes externas, mas utilizá-los para explicar e contextualizar o cenário epidemiológico.
-
-Outras limitações importantes:
-
-- Indicadores de UTI e vacinação são proxies baseadas nos campos disponíveis, não estimativas de ocupação real de leitos ou cobertura vacinal populacional.
-- Dados recentes podem estar incompletos por atraso de notificação e sujeitos a revisão.
-- A validação automatizada não substitui uma revisão epidemiológica humana.
-- Os testes unitários não comprovam, isoladamente, a confiabilidade de todas as integrações externas.
-
-## 13. Referências técnicas
-
-- [Dados Abertos do Ministério da Saúde — SRAG 2019–2026](https://dadosabertos.saude.gov.br/dataset/srag-2019-a-2026)
-- [OpenDataSUS — SRAG 2021–2024](https://opendatasus.saude.gov.br/dataset/srag-2021-a-2024)
-- [Dicionário de dados SIVEP-Gripe](https://opendatasus.saude.gov.br/dataset/srag-2021-a-2024/resource/3135ac9c-2019-4989-a893-2ed50ebd8e68)
-- [Google Gemini API — Modelos](https://ai.google.dev/gemini-api/docs/models)
-- [Google Gemini API — Function Calling](https://ai.google.dev/gemini-api/docs/function-calling)
-- [LangGraph — Documentação](https://docs.langchain.com/oss/python/langgraph/overview)
-- [Pytest — Documentação](https://docs.pytest.org/)
-
----
-
-**Repositório:** [vitorturcisn/indiciumai-healthcare-ai-poc](https://github.com/vitorturcisn/indiciumai-healthcare-ai-poc)
+Antes de publicar, revise o diff, confira se os CSVs, o SQLite, relatórios e logs estão ignorados pelo Git, execute novamente `python -m pytest -q` e valide que o README e o diagrama correspondem ao código efetivamente entregue. Prefira commits pequenos e com propósito claro; não sobrescreva `main` sem revisão e abra um Pull Request para avaliação.
