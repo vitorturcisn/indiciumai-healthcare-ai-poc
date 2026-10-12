@@ -460,3 +460,119 @@ def test_news_guardrail_accepts_explicit_snippet_only_limitation():
 
     result = validate_report(report, tools)
     assert not any("conteúdo integral não foi recuperado" in problem for problem in result["problemas"])
+
+# NEWS_EVIDENCE_REGRESSION_TESTS_V1
+
+def test_news_guardrail_rejects_trend_direction_opposite_to_source():
+    url = "https://www.gov.br/saude/informe-se-39-2026"
+    title = "Informe SE 39 de vigilância nacional"
+    evidence = (
+        "O boletim indica queda de casos de SRAG no Brasil "
+        "na tendência nacional de longo prazo."
+    )
+    tools = _news_guardrail_tools({
+        "status": "success",
+        "results": [{
+            "titulo": title,
+            "url": url,
+            "conteudo_extraido": True,
+            "status_conteudo": "extraido",
+            "texto_conteudo": evidence,
+            "trechos_relevantes": [evidence],
+        }],
+    })
+    report = _news_guardrail_report(
+        f"O {title} descreve aumento de casos de SRAG no Brasil "
+        f"na tendência nacional de longo prazo. Fonte: [{title}]({url})."
+    )
+
+    result = validate_report(report, tools)
+
+    assert not result["ok"], (
+        "O validador aceitou crescimento quando a evidência afirma queda."
+    )
+
+
+def test_news_guardrail_rejects_unsupported_claim_after_supported_sentence():
+    url = "https://www.gov.br/saude/informe-srag"
+    title = "Informe nacional de SRAG"
+    evidence = (
+        "O boletim descreve queda nacional nos casos de SRAG "
+        "na tendência de longo prazo."
+    )
+    tools = _news_guardrail_tools({
+        "status": "success",
+        "results": [{
+            "titulo": title,
+            "url": url,
+            "conteudo_extraido": True,
+            "status_conteudo": "extraido",
+            "texto_conteudo": evidence,
+            "trechos_relevantes": [evidence],
+        }],
+    })
+    report = _news_guardrail_report(
+        f"O boletim descreve queda nacional nos casos de SRAG "
+        f"na tendência de longo prazo. "
+        f"O documento também confirma o aparecimento de um patógeno "
+        f"resistente e determina o fechamento imediato de escolas "
+        f"em todo o país. Fonte: [{title}]({url})."
+    )
+
+    result = validate_report(report, tools)
+
+    assert not result["ok"], (
+        "Uma frase sustentada permitiu que outra afirmação sem evidência passasse."
+    )
+
+
+def test_news_guardrail_rejects_claim_attributed_to_wrong_source():
+    url_a = "https://www.gov.br/saude/informe-se-39-2026"
+    title_a = "Informe SE 39 de vigilância nacional"
+    evidence_a = (
+        "O informe descreve queda de casos de SRAG no Brasil "
+        "na tendência de longo prazo."
+    )
+
+    url_b = "https://www.gov.br/saude/nota-tecnica-vacinacao"
+    title_b = "Nota técnica sobre vacinação escolar"
+    evidence_b = (
+        "A nota técnica recomenda vacinação em escolas de São Paulo "
+        "para prevenir doença específica."
+    )
+
+    tools = _news_guardrail_tools({
+        "status": "success",
+        "results": [
+            {
+                "titulo": title_a,
+                "url": url_a,
+                "conteudo_extraido": True,
+                "status_conteudo": "extraido",
+                "texto_conteudo": evidence_a,
+                "trechos_relevantes": [evidence_a],
+            },
+            {
+                "titulo": title_b,
+                "url": url_b,
+                "conteudo_extraido": True,
+                "status_conteudo": "extraido",
+                "texto_conteudo": evidence_b,
+                "trechos_relevantes": [evidence_b],
+            },
+        ],
+    })
+
+    report = _news_guardrail_report(
+        f"O {title_a} descreve queda de casos de SRAG no Brasil "
+        f"na tendência de longo prazo. "
+        f"Segundo o {title_a}, recomenda-se vacinação em escolas "
+        f"de São Paulo para prevenir doença específica. "
+        f"Fonte: [{title_a}]({url_a})."
+    )
+
+    result = validate_report(report, tools)
+
+    assert not result["ok"], (
+        "O validador aceitou uma afirmação atribuída à fonte errada."
+    )

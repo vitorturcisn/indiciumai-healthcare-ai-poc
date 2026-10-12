@@ -10,17 +10,28 @@ from urllib.parse import urlparse
 from .config import SOURCE_DATASET_URL
 from .news import allowed_url
 
+
 BLOCKED_INPUT_PATTERNS = (
-    r"\bcpf\b", r"\bnome completo\b", r"\bendereço residencial\b",
-    r"\bdados individuais\b", r"\bregistro individual\b",
-    r"\bprontuário\b", r"\bidentifique (?:o|a|um|uma) paciente\b",
-    r"\bexiba (?:todos os )?registros\b", r"\bdados pessoais de pacientes\b",
+    r"\bcpf\b",
+    r"\bnome completo\b",
+    r"\bendereço residencial\b",
+    r"\bdados individuais\b",
+    r"\bregistro individual\b",
+    r"\bprontuário\b",
+    r"\bidentifique (?:o|a|um|uma) paciente\b",
+    r"\bexiba (?:todos os )?registros\b",
+    r"\bdados pessoais de pacientes\b",
 )
+
 INJECTION_PATTERNS = (
     r"ignore (?:todas as )?as instruções anteriores",
-    r"ignore previous instructions", r"revele (?:o )?prompt do sistema",
-    r"ignore o guardrail", r"exiba a base completa", r"select\s+\*\s+from",
+    r"ignore previous instructions",
+    r"revele (?:o )?prompt do sistema",
+    r"ignore o guardrail",
+    r"exiba a base completa",
+    r"select\s+\*\s+from",
 )
+
 REQUIRED_REPORT_ELEMENTS = (
     "Relatório Epidemiológico de SRAG",
     "Período analisado",
@@ -35,8 +46,9 @@ REQUIRED_REPORT_ELEMENTS = (
     "Contexto externo / notícias",
     "Fontes consultadas",
 )
+
 PERCENT_RE = re.compile(r"(?<![\w/])(-?\d+(?:[.,]\d+)?)\s*%")
-URL_RE = re.compile(r"https?://[^\s<>\]\)\"']+", re.IGNORECASE)
+URL_RE = re.compile(r"https?://[^\s<>\"')\]]+", re.IGNORECASE)
 
 
 def validate_user_request(request: str) -> str:
@@ -47,7 +59,11 @@ def validate_user_request(request: str) -> str:
         raise ValueError("A solicitação excede o limite de 2.000 caracteres.")
     for pattern in BLOCKED_INPUT_PATTERNS + INJECTION_PATTERNS:
         if re.search(pattern, normalized, flags=re.IGNORECASE):
-            raise ValueError("Solicitação bloqueada pelo guardrail: consultas individualizadas, exposição de dados pessoais ou tentativa de sobrescrever instruções não são permitidas.")
+            raise ValueError(
+                "Solicitação bloqueada pelo guardrail: consultas individualizadas, "
+                "exposição de dados pessoais ou tentativa de sobrescrever instruções "
+                "não são permitidas."
+            )
     return normalized
 
 
@@ -61,7 +77,10 @@ def _pct_token(value: str) -> str:
 
 def _allowed_percentages(tool_results: dict[str, Any]) -> set[str]:
     serialized = json.dumps(tool_results, ensure_ascii=False, default=str)
-    return {_pct_token(match.group(1)) for match in PERCENT_RE.finditer(serialized)}
+    return {
+        _pct_token(match.group(1))
+        for match in PERCENT_RE.finditer(serialized)
+    }
 
 
 def _number_aliases(token: str) -> set[str]:
@@ -72,24 +91,37 @@ def _number_aliases(token: str) -> set[str]:
         aliases.add(f"{float(token.replace(',', '.')):.6f}".rstrip("0").rstrip("."))
     except ValueError:
         pass
+
     # Separadores de milhar em relatórios brasileiros e anglófonos.
-    for normalized in (token.replace(".", "").replace(",", "."), token.replace(",", "")):
+    for normalized in (
+        token.replace(".", "").replace(",", "."),
+        token.replace(",", ""),
+    ):
         try:
             aliases.add(f"{float(normalized):.6f}".rstrip("0").rstrip("."))
         except ValueError:
             pass
+
     return aliases
 
 
 def _collect_grounded_numbers(value: Any, key: str = "") -> set[str]:
-    """Coleta valores numéricos dos resultados de tools, sem confundir datas com contagens.
+    """Coleta números das tools sem confundir datas com contagens.
 
-    Importante: chaves como ``casos_periodo_recente`` contêm CONTAGENS e não
-    devem ser descartadas apenas porque incluem a palavra ``periodo``.
+    Chaves como ``casos_periodo_recente`` contêm contagens e não devem
+    ser descartadas apenas porque incluem a palavra ``periodo``.
     """
     grounded: set[str] = set()
     key_lower = key.lower()
-    ignored_fragments = ("url", "fonte", "query", "timestamp", "sha256", "path", "arquivo")
+    ignored_fragments = (
+        "url",
+        "fonte",
+        "query",
+        "timestamp",
+        "sha256",
+        "path",
+        "arquivo",
+    )
 
     if isinstance(value, dict):
         for child_key, child in value.items():
@@ -100,14 +132,19 @@ def _collect_grounded_numbers(value: Any, key: str = "") -> set[str]:
     elif isinstance(value, bool) or value is None:
         return grounded
     elif isinstance(value, (int, float)):
-        # Ignorar números que são componentes de metadados/data, mas preservar
-        # contagens em chaves como casos_periodo_recente.
-        if not any(fragment in key_lower for fragment in ignored_fragments) and not key_lower.startswith("data_"):
+        if (
+            not any(fragment in key_lower for fragment in ignored_fragments)
+            and not key_lower.startswith("data_")
+        ):
             grounded.update(_number_aliases(str(value)))
     elif isinstance(value, str):
         if any(fragment in key_lower for fragment in ignored_fragments):
             return grounded
-        if key_lower.startswith("data_") or "periodo" in key_lower or "timestamp" in key_lower:
+        if (
+            key_lower.startswith("data_")
+            or "periodo" in key_lower
+            or "timestamp" in key_lower
+        ):
             return grounded
         if "%" in value:
             return grounded
@@ -116,46 +153,63 @@ def _collect_grounded_numbers(value: Any, key: str = "") -> set[str]:
             return grounded
         for match in re.finditer(r"(?<![\w/])-?\d+(?:[.,]\d+)?", value):
             grounded.update(_number_aliases(match.group(0)))
+
     return grounded
 
 
 def _extract_report_urls(text: str) -> set[str]:
-    """Extrai URLs inclusive quando um modelo emite '\\n' literal entre bullets."""
-    normalized = text.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\r", "\n")
-    normalized = normalized.replace("\n", "\n")
+    """Extrai URLs inclusive quando o modelo emite '\\n' literal entre bullets."""
+    normalized = (
+        text.replace("\\r\\n", "\n")
+        .replace("\\n", "\n")
+        .replace("\\r", "\n")
+    )
     found: set[str] = set()
+
     for item in URL_RE.findall(normalized):
         candidate = item.strip().rstrip(".,;:")
-        # Evita incluir separadores de Markdown que tenham sido anexados após
-        # uma sequência de nova linha escapada.
-        candidate = re.split(r"\\[nr]", candidate, maxsplit=1)[0].rstrip("- \t.,;:")
+        candidate = re.split(r"\\[nr]", candidate, maxsplit=1)[0]
+        candidate = candidate.rstrip("- \t.,;:")
         if candidate:
             found.add(candidate)
+
     return found
 
 
 def _extract_report_section(text: str, section: str | None) -> str:
     """Retorna o corpo de uma seção Markdown de nível 2, sem seu título."""
-    normalized = text.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\r", "\n")
+    normalized = (
+        text.replace("\\r\\n", "\n")
+        .replace("\\n", "\n")
+        .replace("\\r", "\n")
+    )
     if section is None:
         return normalized
+
     main_sections = list(re.finditer(r"(?m)^##\s+(?!#)(.+?)\s*$", normalized))
     wanted = section.strip().casefold()
+
     for index, match in enumerate(main_sections):
         if match.group(1).strip().casefold() == wanted:
-            end = main_sections[index + 1].start() if index + 1 < len(main_sections) else len(normalized)
+            end = (
+                main_sections[index + 1].start()
+                if index + 1 < len(main_sections)
+                else len(normalized)
+            )
             return normalized[match.end():end]
+
     return ""
 
 
-def _report_numeric_tokens(text: str, section: str | None = "Indicadores epidemiológicos") -> list[str]:
-    """Extrai números para validação de proveniência, por contexto semântico.
+def _report_numeric_tokens(
+    text: str,
+    section: str | None = "Indicadores epidemiológicos",
+) -> list[str]:
+    """Extrai números para validação de proveniência por contexto semântico.
 
-    Os indicadores e a metodologia são validados contra resultados agregados;
-    números no contexto externo são validados contra títulos/resumos das fontes.
     Datas, semanas epidemiológicas, códigos e referências numeradas são
-    metadados e não devem ser tratados como métricas novas. Percentuais são
-    verificados separadamente em todo o relatório.
+    metadados e não devem ser tratados como novas métricas. Percentuais
+    são verificados separadamente em todo o relatório.
     """
     cleaned = _extract_report_section(text, section)
     cleaned = URL_RE.sub(" ", cleaned)
@@ -171,19 +225,40 @@ def _report_numeric_tokens(text: str, section: str | None = "Indicadores epidemi
     for pattern in date_patterns:
         cleaned = re.sub(pattern, " ", cleaned, flags=re.IGNORECASE)
 
-    cleaned = re.sub(r"\b(?:EVOLUCAO|UTI|VACINA_COV)\s*=\s*\d+(?:[.,]\d+)?", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(
+        r"\b(?:EVOLUCAO|UTI|VACINA_COV)\s*=\s*\d+(?:[.,]\d+)?",
+        " ",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
     cleaned = re.sub(r"\bCOVID\s*-\s*19\b", "COVID", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\bP\s*-?\s*90\b", "P", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\b(?:19|20)\d{2}\b", " ", cleaned)
-    cleaned = re.sub(r"\b(?:SE|semana epidemiológica|semana epidemiologica)\s*\d+\b", " ", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"grafico_30_dias|grafico_12_meses", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(
+        r"\b(?:SE|semana epidemiológica|semana epidemiologica)\s*\d+\b",
+        " ",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"grafico_30_dias|grafico_12_meses",
+        " ",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
     cleaned = PERCENT_RE.sub(" ", cleaned)
     cleaned = re.sub(r"(?m)^\s*\d+[.)]\s+", " ", cleaned)
     cleaned = re.sub(r"\[\s*\d{1,4}\s*\]", " ", cleaned)
-    cleaned = re.sub(r"\(\s*(?:ref\.?\s*)?\d{1,4}\s*\)", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(
+        r"\(\s*(?:ref\.?\s*)?\d{1,4}\s*\)",
+        " ",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
 
     return [
-        token for token in re.findall(r"(?<![\w/])-?\d+(?:[.,]\d+)?", cleaned)
+        token
+        for token in re.findall(r"(?<![\w/])-?\d+(?:[.,]\d+)?", cleaned)
         if token not in {"30", "12"}
     ]
 
@@ -191,16 +266,22 @@ def _report_numeric_tokens(text: str, section: str | None = "Indicadores epidemi
 def _allowed_urls(tool_results: dict[str, Any]) -> set[str]:
     allow = {SOURCE_DATASET_URL.rstrip("/")}
     metric = tool_results.get("consultar_metricas", {})
+
     if isinstance(metric, dict):
         source_url = metric.get("fonte")
         if isinstance(source_url, str) and urlparse(source_url).scheme == "https":
             allow.add(source_url.rstrip("/"))
+
     news = tool_results.get("buscar_noticias", {})
     for result in news.get("results", []) if isinstance(news, dict) else []:
+        if not isinstance(result, dict):
+            continue
         url = result.get("url")
         if isinstance(url, str) and allowed_url(url):
             allow.add(url.rstrip("/"))
+
     return allow
+
 
 # NEWS_SYNTHESIS_GUARDRAIL_V1
 _NEWS_STOPWORDS = {
@@ -222,22 +303,21 @@ def _news_normalize_text(value: Any) -> str:
     import unicodedata
 
     folded = unicodedata.normalize("NFKD", str(value or ""))
-    return "".join(character for character in folded if not unicodedata.combining(character)).casefold()
+    return "".join(
+        character
+        for character in folded
+        if not unicodedata.combining(character)
+    ).casefold()
 
 
 def _news_evidence_tokens(value: Any) -> set[str]:
     normalized = _news_normalize_text(value)
     tokens = re.findall(r"\b[a-z0-9]{4,}\b", normalized)
-    return {token for token in tokens if token not in _NEWS_STOPWORDS and not token.isdigit()}
-
-
-def _news_item_evidence(item: dict[str, Any]) -> str:
-    passages = item.get("trechos_relevantes")
-    if isinstance(passages, list):
-        useful = [str(part).strip() for part in passages if str(part).strip()]
-        if useful:
-            return "\n".join(useful)
-    return str(item.get("texto_conteudo") or "").strip()
+    return {
+        token
+        for token in tokens
+        if token not in _NEWS_STOPWORDS and not token.isdigit()
+    }
 
 
 def _news_has_limitation_disclosure(section: str) -> bool:
@@ -258,29 +338,144 @@ def _news_has_limitation_disclosure(section: str) -> bool:
     return any(phrase in normalized for phrase in accepted_phrases)
 
 
+def _news_item_passages(item: dict[str, Any]) -> list[str]:
+    """Retorna passagens individuais para não misturar tendências ou fontes."""
+    passages = item.get("trechos_relevantes")
+    if isinstance(passages, list):
+        result = [
+            str(value).strip()
+            for value in passages
+            if str(value).strip()
+        ]
+        if result:
+            return result
+
+    text = str(item.get("texto_conteudo") or "").strip()
+    return [
+        part.strip()
+        for part in re.split(r"(?<=[.!?])\s+|\n+", text)
+        if part.strip()
+    ]
+
+
+def _news_claim_sentences(section: str) -> list[str]:
+    """Divide a síntese em afirmações candidatas, ignorando referências e ressalvas."""
+    text = (
+        section.replace("\\r\\n", "\n")
+        .replace("\\n", "\n")
+        .replace("\\r", "\n")
+    )
+    text = re.sub(r"(?m)^#{1,6}\s.*$", " ", text)
+    text = re.sub(r"!\[[^\]]*\]\([^)]+\)", " ", text)
+    text = re.sub(r"\[([^\]]+)\]\(https?://[^)]+\)", r"\1", text)
+    text = URL_RE.sub(" ", text)
+
+    claims: list[str] = []
+    ignored_phrases = (
+        "informacoes institucionais a seguir",
+        "nao se confundem com as metricas",
+        "data indicada no resumo",
+        "data da publicacao",
+        "publicado em",
+        "conteudo integral nao foi recuperado",
+        "sintese tecnica substantiva confiavel",
+    )
+
+    for fragment in re.split(r"(?<=[.!?])\s+|\n+", text):
+        sentence = re.sub(r"^\s*[-*>\s]+", "", fragment).strip()
+        if not sentence or sentence.endswith(":"):
+            continue
+
+        normalized = _news_normalize_text(sentence)
+
+        if re.match(r"^(fonte|url|link)\s*:?", normalized):
+            continue
+        if any(phrase in normalized for phrase in ignored_phrases):
+            continue
+        if _news_has_limitation_disclosure(sentence):
+            continue
+        if len(_news_evidence_tokens(sentence)) < 4:
+            continue
+
+        claims.append(sentence)
+
+    return claims
+
+
+def _news_trend_polarities(text: str) -> set[str]:
+    """Detecta marcadores explícitos de queda, crescimento ou estabilidade.
+
+    É uma verificação lexical conservadora, não uma prova de verdade semântica.
+    """
+    tokens = re.findall(r"\b[a-z0-9]+\b", _news_normalize_text(text))
+    categories = {
+        "queda": {
+            "queda", "reducao", "reducoes", "diminui", "diminuiu",
+            "diminuicao", "declinio", "cai", "caiu", "decrescimo",
+        },
+        "crescimento": {
+            "aumento", "aumentou", "aumentaram", "crescimento",
+            "cresceu", "cresceram", "alta", "subida", "subiu",
+            "elevacao", "ascendente",
+        },
+        "estabilidade": {
+            "estabilizacao", "estabilidade", "estavel",
+            "oscilacao", "oscilacoes", "oscilando",
+        },
+    }
+    negations = {"nao", "sem", "ausencia", "ausente"}
+    polarities: set[str] = set()
+
+    for index, token in enumerate(tokens):
+        preceding = tokens[max(0, index - 2):index]
+        if any(word in negations for word in preceding):
+            continue
+        for polarity, vocabulary in categories.items():
+            if token in vocabulary:
+                polarities.add(polarity)
+
+    return polarities
+
+
+def _news_trend_conflicts(claim: str, evidence: str) -> bool:
+    claim_polarities = _news_trend_polarities(claim)
+    evidence_polarities = _news_trend_polarities(evidence)
+    return bool(
+        claim_polarities
+        and evidence_polarities
+        and not (claim_polarities & evidence_polarities)
+    )
+
+
 def _validate_news_synthesis(text: str, news_result: Any) -> list[str]:
-    """Exige evidência textual e fonte identificável, ou uma limitação explícita."""
+    """Exige suporte individual às afirmações e preserva tendências explícitas."""
     if not isinstance(news_result, dict):
         return []
+
     results = news_result.get("results", [])
     if not isinstance(results, list) or not results:
         # Erros e ausência de resultados têm regras de transparência próprias.
         return []
+
     items = [item for item in results if isinstance(item, dict)]
     metadata_present = any(
-        "conteudo_extraido" in item or "status_conteudo" in item or "texto_conteudo" in item
+        "conteudo_extraido" in item
+        or "status_conteudo" in item
+        or "texto_conteudo" in item
         for item in items
     )
-    # Compatibilidade com tool results históricos usados em relatórios antigos/tests;
-    # a implementação atual da ferramenta sempre fornece esses campos.
+
+    # Compatibilidade com resultados antigos usados em testes legados.
     if not metadata_present:
         return []
 
     section = _extract_report_section(text, "Contexto externo / notícias")
     extracted_items = [
         item for item in items
-        if item.get("conteudo_extraido") is True or item.get("status_conteudo") == "extraido"
+        if item.get("conteudo_extraido") is True
+        or item.get("status_conteudo") == "extraido"
     ]
+
     if not extracted_items:
         if not _news_has_limitation_disclosure(section):
             return [
@@ -288,50 +483,132 @@ def _validate_news_synthesis(text: str, news_result: Any) -> list[str]:
             ]
         return []
 
-    section_tokens = _news_evidence_tokens(section)
-    for item in extracted_items:
-        evidence = _news_item_evidence(item)
-        evidence_tokens = _news_evidence_tokens(evidence)
-        if not evidence_tokens:
-            continue
-        overlap = section_tokens & evidence_tokens
-        title = str(item.get("titulo") or "").strip()
-        url = str(item.get("url") or "").strip().rstrip("/")
-        normalized_section = _news_normalize_text(section)
-        source_referenced = bool(url and url in section) or bool(
-            title and _news_normalize_text(title) in normalized_section
+    normalized_section = _news_normalize_text(section)
+    referenced_items = [
+        item for item in extracted_items
+        if (
+            str(item.get("titulo") or "").strip()
+            and _news_normalize_text(item["titulo"]) in normalized_section
         )
-        # Três termos substantivos comuns entre o corpo extraído e o relatório
-        # reduzem aprovações baseadas apenas no título/URL sem exigir cópia literal.
-        if len(overlap) >= 3 and source_referenced:
-            return []
-
-    return [
-        "A seção de notícias não apresenta um achado concreto apoiado no conteúdo extraído e associado à fonte; títulos e URLs, isoladamente, não bastam."
+        or (
+            str(item.get("url") or "").strip()
+            and str(item["url"]).rstrip("/") in section
+        )
     ]
 
+    if not referenced_items:
+        return [
+            "A síntese de notícias não identifica nenhuma das fontes cujo conteúdo foi extraído."
+        ]
 
-def validate_report(text: str, tool_results: dict[str, Any]) -> dict[str, Any]:
+    claims = _news_claim_sentences(section)
+    if not claims:
+        return [
+            "A seção de notícias não apresenta um achado concreto apoiado em evidências extraídas; títulos e URLs isoladamente não bastam."
+        ]
+
+    unsupported: list[str] = []
+
+    for claim in claims:
+        normalized_claim = _news_normalize_text(claim)
+
+        # Se uma afirmação cita uma fonte pelo título, só essa fonte pode
+        # sustentá-la. Sem citação explícita, verificamos as fontes listadas.
+        directly_referenced = [
+            item for item in referenced_items
+            if (
+                str(item.get("titulo") or "").strip()
+                and _news_normalize_text(item["titulo"]) in normalized_claim
+            )
+            or (
+                str(item.get("url") or "").strip()
+                and str(item["url"]).rstrip("/") in claim
+            )
+        ]
+        candidates = directly_referenced or referenced_items
+        claim_tokens = _news_evidence_tokens(claim)
+        claim_supported = False
+
+        for item in candidates:
+            for passage in _news_item_passages(item):
+                evidence_tokens = _news_evidence_tokens(passage)
+
+                # Exige correspondência substantiva em uma passagem individual.
+                if len(claim_tokens & evidence_tokens) < 3:
+                    continue
+
+                # Não aceita correspondência lexical com direção incompatível.
+                if _news_trend_conflicts(claim, passage):
+                    continue
+
+                claim_supported = True
+                break
+
+            if claim_supported:
+                break
+
+        if not claim_supported:
+            unsupported.append(claim)
+
+    if unsupported:
+        return [
+            "Há afirmações na seção de notícias sem suporte suficiente em passagens da fonte atribuída, ou com direção de tendência incompatível com a evidência."
+        ]
+
+    return []
+
+
+def validate_report(
+    text: str,
+    tool_results: dict[str, Any],
+) -> dict[str, Any]:
     problems: list[str] = []
     lower = text.lower()
+
     for required in REQUIRED_REPORT_ELEMENTS:
         if required.lower() not in lower:
             problems.append(f"Seção/conteúdo obrigatório ausente: {required}")
 
-    required_tools = {"consultar_metricas", "gerar_graficos", "buscar_noticias"}
+    required_tools = {
+        "consultar_metricas",
+        "gerar_graficos",
+        "buscar_noticias",
+    }
     missing_tools = sorted(required_tools - set(tool_results))
     if missing_tools:
-        problems.append("Ferramentas obrigatórias não executadas: " + ", ".join(missing_tools))
+        problems.append(
+            "Ferramentas obrigatórias não executadas: " + ", ".join(missing_tools)
+        )
+
     metric_result = tool_results.get("consultar_metricas", {})
     chart_result = tool_results.get("gerar_graficos", {})
-    if isinstance(metric_result, dict) and metric_result.get("status") in {"error", "blocked"}:
-        problems.append("A ferramenta de métricas falhou; o relatório não pode apresentar os indicadores como calculados.")
+
+    if (
+        isinstance(metric_result, dict)
+        and metric_result.get("status") in {"error", "blocked"}
+    ):
+        problems.append(
+            "A ferramenta de métricas falhou; o relatório não pode apresentar "
+            "os indicadores como calculados."
+        )
+
     if not isinstance(chart_result, dict) or chart_result.get("status") != "success":
         problems.append("A ferramenta de gráficos não terminou com sucesso.")
+
     news_result = tool_results.get("buscar_noticias", {})
     if isinstance(news_result, dict) and news_result.get("status") == "error":
-        if not any(phrase in lower for phrase in ("falha na busca", "busca falhou", "não foi possível realizar a busca", "nao foi possivel realizar a busca")):
-            problems.append("A busca de notícias falhou, mas o relatório não informa essa limitação.")
+        if not any(
+            phrase in lower
+            for phrase in (
+                "falha na busca",
+                "busca falhou",
+                "não foi possível realizar a busca",
+                "nao foi possivel realizar a busca",
+            )
+        ):
+            problems.append(
+                "A busca de notícias falhou, mas o relatório não informa essa limitação."
+            )
 
     problems.extend(_validate_news_synthesis(text, news_result))
 
@@ -340,59 +617,124 @@ def validate_report(text: str, tool_results: dict[str, Any]) -> dict[str, Any]:
             problems.append(f"Referência ao gráfico obrigatório ausente: {graph_name}")
 
     if "VACINA_COV" not in text and "covid-19" not in lower and "covid" not in lower:
-        problems.append("O relatório não identifica claramente a variável de vacinação contra COVID-19.")
-    if not any(phrase in lower for phrase in ("óbito por outras causas", "obito por outras causas")):
-        problems.append("O relatório não esclarece o tratamento de EVOLUCAO=3 (óbito por outras causas).")
+        problems.append(
+            "O relatório não identifica claramente a variável de vacinação contra COVID-19."
+        )
 
-    quality_result = metric_result.get("qualidade_e_completude", {}) if isinstance(metric_result, dict) else {}
-    duplicate_count = quality_result.get("duplicidades_exatas_na_base_minimizada") if isinstance(quality_result, dict) else None
+    if not any(
+        phrase in lower
+        for phrase in ("óbito por outras causas", "obito por outras causas")
+    ):
+        problems.append(
+            "O relatório não esclarece o tratamento de EVOLUCAO=3 (óbito por outras causas)."
+        )
+
+    quality_result = (
+        metric_result.get("qualidade_e_completude", {})
+        if isinstance(metric_result, dict)
+        else {}
+    )
+    duplicate_count = (
+        quality_result.get("duplicidades_exatas_na_base_minimizada")
+        if isinstance(quality_result, dict)
+        else None
+    )
+
     if duplicate_count is not None:
-        if "duplicidades exatas" not in lower and "duplicações exatas" not in lower and "duplicacoes exatas" not in lower:
-            problems.append("O relatório deve mencionar as duplicidades exatas encontradas na base minimizada.")
-        if not any(phrase in lower for phrase in ("não equivalem a duplicações confirmadas", "nao equivalem a duplicacoes confirmadas", "não comprovam duplicações", "nao comprovam duplicacoes", "não comprova duplicações", "nao comprova duplicacoes", "não provam duplicação de pacientes", "nao provam duplicacao de pacientes")):
-            problems.append("O relatório deve esclarecer que duplicidades na base minimizada não comprovam duplicações reais de pacientes/notificações.")
+        if not any(
+            phrase in lower
+            for phrase in (
+                "duplicidades exatas",
+                "duplicações exatas",
+                "duplicacoes exatas",
+            )
+        ):
+            problems.append(
+                "O relatório deve mencionar as duplicidades exatas encontradas na base minimizada."
+            )
+
+        if not any(
+            phrase in lower
+            for phrase in (
+                "não equivalem a duplicações confirmadas",
+                "nao equivalem a duplicacoes confirmadas",
+                "não comprovam duplicações",
+                "nao comprovam duplicacoes",
+                "não comprova duplicações",
+                "nao comprova duplicacoes",
+                "não provam duplicação de pacientes",
+                "nao provam duplicacao de pacientes",
+            )
+        ):
+            problems.append(
+                "O relatório deve esclarecer que duplicidades na base minimizada "
+                "não comprovam duplicações reais de pacientes/notificações."
+            )
 
     allowed_pct = _allowed_percentages(tool_results)
     unsupported_percentages = []
+
     for match in PERCENT_RE.finditer(text):
         token = _pct_token(match.group(1))
         if token not in allowed_pct:
             unsupported_percentages.append(match.group(0))
+
     if unsupported_percentages:
-        problems.append("Percentuais não encontrados nos resultados das ferramentas: " + ", ".join(sorted(set(unsupported_percentages))))
+        problems.append(
+            "Percentuais não encontrados nos resultados das ferramentas: "
+            + ", ".join(sorted(set(unsupported_percentages)))
+        )
 
     grounded_numbers = _collect_grounded_numbers(tool_results)
     unsupported_numbers: list[str] = []
 
-    # Métricas, período, gráficos e metodologia devem usar números dos
-    # resultados analíticos. Isso evita confundir os números de notícias e
-    # citações com os valores calculados pela base.
-    for section in ("Período analisado", "Indicadores epidemiológicos", "Gráficos", "Metodologia e limitações"):
+    # Métricas, período, gráficos e metodologia devem usar números das tools.
+    for section in (
+        "Período analisado",
+        "Indicadores epidemiológicos",
+        "Gráficos",
+        "Metodologia e limitações",
+    ):
         for token in _report_numeric_tokens(text, section=section):
             if not (_number_aliases(token) & grounded_numbers):
                 unsupported_numbers.append(token)
 
-    # No contexto externo, qualquer número apresentado como fato precisa
-    # estar presente em um título/resumo retornado pela ferramenta de notícias.
+    # Números no contexto externo precisam estar presentes no resultado das notícias.
     grounded_news_numbers = _collect_grounded_numbers({"news": news_result})
-    for token in _report_numeric_tokens(text, section="Contexto externo / notícias"):
+    for token in _report_numeric_tokens(
+        text,
+        section="Contexto externo / notícias",
+    ):
         if not (_number_aliases(token) & grounded_news_numbers):
             unsupported_numbers.append(token)
 
     if unsupported_numbers:
-        problems.append("Números sem proveniência nos resultados das ferramentas: " + ", ".join(sorted(set(unsupported_numbers))))
+        problems.append(
+            "Números sem proveniência nos resultados das ferramentas: "
+            + ", ".join(sorted(set(unsupported_numbers)))
+        )
 
     allowed_urls = _allowed_urls(tool_results)
     used_urls = _extract_report_urls(text)
-    unknown_urls = sorted(url for url in used_urls if url.rstrip("/") not in allowed_urls)
+    unknown_urls = sorted(
+        url for url in used_urls
+        if url.rstrip("/") not in allowed_urls
+    )
+
     if unknown_urls:
-        problems.append("URLs sem proveniência nas ferramentas: " + ", ".join(unknown_urls))
+        problems.append(
+            "URLs sem proveniência nas ferramentas: " + ", ".join(unknown_urls)
+        )
 
     return {
         "ok": not problems,
         "problemas": problems,
-        "percentuais_encontrados": [m.group(0) for m in PERCENT_RE.finditer(text)],
+        "percentuais_encontrados": [
+            match.group(0) for match in PERCENT_RE.finditer(text)
+        ],
         "urls_encontradas": sorted(used_urls),
         "urls_sem_proveniencia": unknown_urls,
-        "hash_relatorio_sha256": __import__("hashlib").sha256(text.encode("utf-8")).hexdigest(),
+        "hash_relatorio_sha256": __import__("hashlib").sha256(
+            text.encode("utf-8")
+        ).hexdigest(),
     }
