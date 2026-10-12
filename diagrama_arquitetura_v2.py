@@ -96,7 +96,7 @@ def draw_diagram(output: Path = OUTPUT) -> Path:
         (211, 166, "Input Guardrail", ["limite de tamanho", "bloqueio de PII e prompt override", "rejeição antes da ingestão"], YELLOW),
         (398, 188, "Agente LangGraph + Gemini", ["bind_tools / function calling real", "limite compartilhado de tool calls", "tratamento de erros e finalização"], PURPLE),
         (607, 160, "Normalização determinística", ["contagens e denominadores", "EVOLUCAO=3 e duplicidades", "mês parcial e ressalvas"], YELLOW),
-        (788, 160, "Output Validator", ["seções e gráficos obrigatórios", "números, percentuais e URLs", "achados de notícias com evidências"], YELLOW),
+        (788, 160, "Output Validator", ["seções e gráficos obrigatórios", "números, percentuais e URLs", "achados de notícias com evidências", "1 tentativa de reparo se reprovado"], YELLOW),
         (969, 192, "Relatório e artefatos", ["relatorio_final.md", "2 gráficos PNG", "qualidade_dados.json", "banco SQLite e audit JSONL"], GREEN),
     ]
     for x, w, title, body, fill in top_boxes:
@@ -114,7 +114,7 @@ def draw_diagram(output: Path = OUTPUT) -> Path:
 
     tool_y, tool_h = 342, 128
     tool_boxes = [
-        (45, 325, "Tool 1 - consultar_metricas", ["SQLite read-only; agregados e denominadores", "mortalidade / UTI / VACINA_COV", "atraso P90 e qualidade dos dados", "duplicidades após minimização"], BLUE),
+        (45, 325, "Tool 1 - consultar_metricas", ["Consultas SELECT; agregados e denominadores", "mortalidade / UTI / VACINA_COV", "atraso P90 e qualidade dos dados", "duplicidades após minimização"], BLUE),
         (433, 325, "Tool 2 - gerar_graficos", ["série diária dos últimos 30 dias", "série mensal dos últimos 12 meses", "dias/meses ausentes preenchidos com zero", "último mês parcial identificado"], BLUE),
         (821, 325, "Tool 3 - buscar_noticias", ["DDGS com backends limitados e paralelismo", "allowlist: gov.br / fiocruz.br / who.int", "extração HTML/PDF com limites de tamanho", "texto normalizado e trechos rastreáveis", "snippet marcado quando extração falha"], GREEN),
     ]

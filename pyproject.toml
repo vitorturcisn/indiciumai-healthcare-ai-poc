@@ -19,6 +19,7 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest>=8,<10"]
+diagram = ["reportlab>=4,<6"]
 
 [project.scripts]
 srag-poc = "srag_poc.main:main"
