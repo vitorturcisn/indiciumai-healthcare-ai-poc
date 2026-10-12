@@ -323,3 +323,140 @@ https://dadosabertos.saude.gov.br/dataset/srag-2019-a-2026
 """
     result = validate_report(report, tools)
     assert result["ok"], result["problemas"]
+
+# NEWS_SYNTHESIS_GUARDRAIL_TESTS_V1
+
+def _news_guardrail_tools(news_result):
+    return {
+        "consultar_metricas": {
+            "fonte": "https://dadosabertos.saude.gov.br/dataset/srag-2019-a-2026",
+        },
+        "gerar_graficos": {"status": "success"},
+        "buscar_noticias": news_result,
+    }
+
+
+def _news_guardrail_report(context_section):
+    return f"""# Relatório Epidemiológico de SRAG
+## Período analisado
+O período analisado corresponde ao snapshot agregado disponível.
+## Indicadores epidemiológicos
+### Taxa de aumento de casos
+A variação é apresentada conforme a ferramenta de métricas.
+### Proporção de óbitos entre casos com desfecho conhecido
+EVOLUCAO=3 significa óbito por outras causas.
+### Taxa de internação em UTI entre casos SRAG
+A proporção é calculada entre casos com informação conhecida sobre UTI.
+### Proporção de casos com vacina registrada
+VACINA_COV refere-se à vacinação contra COVID-19, não à cobertura populacional.
+### Qualidade e completude dos dados
+Os dados ausentes ou desconhecidos são explicitados nas métricas.
+## Gráficos
+### Casos — últimos 30 dias
+![Casos](grafico_30_dias.png)
+### Casos — últimos 12 meses
+![Casos](grafico_12_meses.png)
+## Metodologia e limitações
+Os indicadores usam seus próprios denominadores; não representam incidência populacional ou ocupação hospitalar real.
+## Contexto externo / notícias
+{context_section}
+## Fontes consultadas
+https://dadosabertos.saude.gov.br/dataset/srag-2019-a-2026
+"""
+
+
+def test_news_guardrail_accepts_a_concrete_extracted_finding_with_source():
+    url = "https://www.gov.br/saude/noticia-infogripe"
+    title = "Informe nacional sobre vírus respiratórios"
+    evidence = (
+        "O boletim descreve aumento de hospitalizações por influenza em Alagoas, "
+        "Roraima e Sergipe, com recomendação de reforço da vigilância epidemiológica."
+    )
+    tools = _news_guardrail_tools({
+        "status": "success",
+        "results": [{
+            "titulo": title,
+            "url": url,
+            "conteudo_extraido": True,
+            "status_conteudo": "extraido",
+            "texto_conteudo": evidence,
+            "trechos_relevantes": [evidence],
+        }],
+    })
+    report = _news_guardrail_report(
+        f"O boletim descreve aumento de hospitalizações por influenza em Alagoas, "
+        f"Roraima e Sergipe. Fonte: [{title}]({url})."
+    )
+
+    result = validate_report(report, tools)
+    assert not any("conteúdo extraído" in problem or "conteúdo integral não foi recuperado" in problem for problem in result["problemas"])
+
+
+def test_news_guardrail_rejects_titles_and_urls_without_extracted_findings():
+    url = "https://www.gov.br/saude/noticia-infogripe"
+    title = "Informe nacional sobre vírus respiratórios"
+    tools = _news_guardrail_tools({
+        "status": "success",
+        "results": [{
+            "titulo": title,
+            "url": url,
+            "conteudo_extraido": True,
+            "status_conteudo": "extraido",
+            "texto_conteudo": (
+                "O boletim descreve aumento de hospitalizações por influenza em Alagoas, "
+                "Roraima e Sergipe, com recomendação de reforço da vigilância epidemiológica."
+            ),
+            "trechos_relevantes": [
+                "O boletim descreve aumento de hospitalizações por influenza em Alagoas, Roraima e Sergipe."
+            ],
+        }],
+    })
+    report = _news_guardrail_report(f"[{title}]({url})")
+
+    result = validate_report(report, tools)
+    assert not result["ok"]
+    assert any("achado concreto" in problem for problem in result["problemas"])
+
+
+def test_news_guardrail_requires_disclosure_when_only_snippets_are_available():
+    url = "https://www.gov.br/saude/noticia-infogripe"
+    title = "Informe nacional sobre vírus respiratórios"
+    tools = _news_guardrail_tools({
+        "status": "success",
+        "results": [{
+            "titulo": title,
+            "url": url,
+            "conteudo_extraido": False,
+            "status_conteudo": "somente_snippet",
+            "texto_conteudo": "",
+            "resumo": "Resumo breve devolvido pela busca.",
+        }],
+    })
+    report = _news_guardrail_report(f"[{title}]({url})")
+
+    result = validate_report(report, tools)
+    assert not result["ok"]
+    assert any("conteúdo integral não foi recuperado" in problem for problem in result["problemas"])
+
+
+def test_news_guardrail_accepts_explicit_snippet_only_limitation():
+    url = "https://www.gov.br/saude/noticia-infogripe"
+    title = "Informe nacional sobre vírus respiratórios"
+    tools = _news_guardrail_tools({
+        "status": "success",
+        "results": [{
+            "titulo": title,
+            "url": url,
+            "conteudo_extraido": False,
+            "status_conteudo": "somente_snippet",
+            "texto_conteudo": "",
+            "resumo": "Resumo breve devolvido pela busca.",
+        }],
+    })
+    report = _news_guardrail_report(
+        f"O conteúdo integral não foi recuperado; apenas os resumos da busca estão disponíveis, "
+        f"e não permitem uma síntese substantiva confiável. Fonte listada: [{title}]({url})."
+    )
+
+    result = validate_report(report, tools)
+    assert not any("conteúdo integral não foi recuperado" in problem for problem in result["problemas"])

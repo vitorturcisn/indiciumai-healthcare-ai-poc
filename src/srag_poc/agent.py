@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Annotated, Any, TypedDict
 
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
@@ -58,6 +59,12 @@ FONTES E SEGURANÇA
 - Se `publicado_em` vier nulo, não afirme que a data foi validada por metadado estruturado. Só mencione
   uma data se ela estiver explicitamente no título/resumo e, se necessário, diga que veio do resumo de busca.
 - Não liste páginas gerais de busca/categoria como notícias individuais.
+- Na seção de notícias, não escreva apenas uma lista de títulos, links ou frases genéricas como “há informes recentes”.
+- Quando `conteudo_extraido=true`, use `trechos_relevantes` e `texto_conteudo` como evidência primária; não trate apenas `titulo` ou `resumo` como conteúdo integral.
+- Apresente pelo menos um achado concreto sustentado pelo texto recuperado (por exemplo, tendência descrita, vírus respiratório citado, região/UF explicitamente mencionada ou recomendação de vigilância documentada), preservando os termos importantes e sem inferir causalidade.
+- Associe o achado à fonte correspondente pelo título e/ou pela URL exata retornada pela ferramenta. Não atribua fatos de uma fonte a outra.
+- Se todos os resultados estiverem com `status_conteudo="somente_snippet"` ou `conteudo_extraido=false`, informe expressamente que o conteúdo integral não foi recuperado e que os snippets não permitem uma síntese substantiva confiável. Não transforme títulos/snippets em achados epidemiológicos.
+- Separe explicitamente o contexto externo dos indicadores calculados no snapshot local. Não misture números, períodos ou tendências de fontes externas com as métricas locais.
 - Se a busca não encontrar notícia, registre isso sem inferir que não existe surto nem risco.
 - Sem diagnóstico, prescrição, aconselhamento clínico, alarmismo ou afirmações de segurança.
 - Não use os termos "incidência populacional", "ocupação real de UTI" ou "cobertura vacinal populacional"
@@ -126,7 +133,18 @@ def _tool_result_summary(tool_name: str, result: Any) -> dict[str, Any]:
     if tool_name == "buscar_noticias":
         return {
             "status": result.get("status"),
-            "sources": [{"titulo": item.get("titulo"), "url": item.get("url"), "publicado_em": item.get("publicado_em")} for item in result.get("results", [])],
+            "sources": [
+                {
+                    "titulo": item.get("titulo"),
+                    "url": item.get("url"),
+                    "publicado_em": item.get("publicado_em"),
+                    "conteudo_extraido": item.get("conteudo_extraido"),
+                    "status_conteudo": item.get("status_conteudo"),
+                    "metodo_extracao": item.get("metodo_extracao"),
+                    "trechos_relevantes": (item.get("trechos_relevantes") or [])[:3],
+                }
+                for item in result.get("results", [])
+            ],
         }
     if tool_name == "gerar_graficos":
         return {key: result.get(key) for key in ("status", "grafico_30_dias", "grafico_12_meses", "data_corte_graficos", "mes_final_parcial")}
@@ -393,6 +411,106 @@ def normalize_report(text: str, tool_results: dict[str, Any]) -> str:
         result = result.replace(marker, f"{marker}\n\n{image}", 1) if marker in result else result + f"\n\n{image}"
 
     metric = tool_results.get("consultar_metricas", {})
+
+    # DUPLICATE_COUNT_NORMALIZATION_V1
+    # Não dependa do LLM para incluir uma métrica obrigatória já calculada.
+    # O validador exige a contagem e sua ressalva metodológica; a normalização
+    # pode inseri-las deterministicamente a partir do resultado da ferramenta.
+    quality = metric.get("qualidade_e_completude", {}) if isinstance(metric, dict) else {}
+    duplicate_count = (
+        quality.get("duplicidades_exatas_na_base_minimizada")
+        if isinstance(quality, dict)
+        else None
+    )
+    if isinstance(duplicate_count, int) and not isinstance(duplicate_count, bool) and duplicate_count >= 0:
+        duplicate_patterns = (
+            re.compile(r"(?<![\w])([\d][\d.,]*)\s+duplic(?:idades|ações|acoes)\s+exatas", re.IGNORECASE),
+            re.compile(r"duplic(?:idades|ações|acoes)\s+exatas[^.\n]{0,120}?([\d][\d.,]*)", re.IGNORECASE),
+        )
+        reported_counts: set[int] = set()
+        for pattern in duplicate_patterns:
+            for match in pattern.finditer(result):
+                digits = re.sub(r"\D", "", match.group(1))
+                if digits:
+                    reported_counts.add(int(digits))
+
+        has_correct_duplicate_count = duplicate_count in reported_counts
+        normalized_text = result.casefold()
+        caveat_phrases = (
+            "não equivalem a duplicações confirmadas",
+            "nao equivalem a duplicacoes confirmadas",
+            "não comprovam duplicações",
+            "nao comprovam duplicacoes",
+            "não comprova duplicações",
+            "nao comprova duplicacoes",
+            "não provam duplicação de pacientes",
+            "nao provam duplicacao de pacientes",
+        )
+        has_duplicate_caveat = any(phrase in normalized_text for phrase in caveat_phrases)
+
+        required_duplicate_notes = []
+        if not has_correct_duplicate_count:
+            required_duplicate_notes.append(
+                f"**Duplicidades exatas na base minimizada:** {duplicate_count}."
+            )
+        if not has_duplicate_caveat:
+            required_duplicate_notes.append(
+                "A contagem usa somente as colunas analíticas minimizadas; não comprova "
+                "duplicações reais de pacientes ou notificações, e esses registros não foram "
+                "removidos automaticamente."
+            )
+
+        if required_duplicate_notes:
+            note = "\n\n".join(required_duplicate_notes)
+            quality_heading = "### Qualidade e completude dos dados"
+            if quality_heading in result:
+                result = result.replace(quality_heading, f"{quality_heading}\n\n{note}", 1)
+            elif "## Indicadores epidemiológicos" in result:
+                marker = "## Indicadores epidemiológicos"
+                fallback = f"{marker}\n\n{quality_heading}\n\n{note}"
+                result = result.replace(marker, fallback, 1)
+            else:
+                result += f"\n\n## Indicadores epidemiológicos\n\n{quality_heading}\n\n{note}"
+
+    # EVOLUCAO3_NORMALIZATION_V1
+    # A classificação e a regra do indicador são conhecidas pela métrica;
+    # normalize esse requisito metodológico deterministicamente, sem criar valores.
+    normalized_report = result.casefold()
+    has_evolucao3_definition = (
+        "óbito por outras causas" in normalized_report
+        or "obito por outras causas" in normalized_report
+    )
+    has_evolucao3_treatment = (
+        "numerador" in normalized_report
+        and ("mortalidade por qualquer causa" in normalized_report or "mortalidade de qualquer causa" in normalized_report)
+        and ("evolucao=2" in normalized_report or "evolucao = 2" in normalized_report)
+    )
+    if not (has_evolucao3_definition and has_evolucao3_treatment):
+        evolucao3_note = (
+            "**Tratamento de EVOLUCAO=3:** EVOLUCAO=3 significa óbito por outras causas. "
+            "Na métrica de mortalidade por qualquer causa entre desfechos conhecidos, "
+            "EVOLUCAO=2 e EVOLUCAO=3 compõem o numerador; o denominador inclui os desfechos "
+            "conhecidos (EVOLUCAO=1, EVOLUCAO=2 ou EVOLUCAO=3). O grupo EVOLUCAO=2 é apresentado separadamente. "
+            "EVOLUCAO=3 não deve ser interpretado como óbito atribuído à SRAG."
+        )
+        mortality_heading = "### Proporção de óbitos entre casos com desfecho conhecido"
+        if evolucao3_note not in result:
+            if mortality_heading in result:
+                result = result.replace(
+                    mortality_heading,
+                    f"{mortality_heading}\n\n{evolucao3_note}",
+                    1,
+                )
+            elif "## Indicadores epidemiológicos" in result:
+                marker_heading = "## Indicadores epidemiológicos"
+                result = result.replace(
+                    marker_heading,
+                    f"{marker_heading}\n\n{mortality_heading}\n\n{evolucao3_note}",
+                    1,
+                )
+            else:
+                result += f"\n\n{mortality_heading}\n\n{evolucao3_note}"
+
     period = metric.get("periodo_dados", {}) if isinstance(metric, dict) else {}
     cutoff = charts.get("data_corte_graficos") or period.get("fim_referencia")
     if cutoff and ("mês parcial" not in result.lower() and "mes parcial" not in result.lower()):

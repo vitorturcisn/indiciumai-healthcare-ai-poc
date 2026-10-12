@@ -4,5 +4,6 @@ langchain-core>=0.3,<2
 langchain-google-genai>=2,<4
 langgraph>=0.2,<2
 ddgs>=9,<10
+pypdf>=4,<7
 pytest>=8,<10
 reportlab>=4,<5

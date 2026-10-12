@@ -8,8 +8,10 @@ data verificável no fallback não são apresentados como notícias recentes.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from html.parser import HTMLParser
+import io
 import re
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -70,6 +72,12 @@ RELEVANCE_TERMS = (
 MAX_DIRECT_NEWS_AGE_DAYS = 60
 HTTP_TIMEOUT_SECONDS = 6
 MAX_RESPONSE_BYTES = 3_000_000
+
+# NEWS_LATENCY_PATCH_V1: limit search-engine fan-out and overlap I/O-bound fetches.
+DDGS_TIMEOUT_SECONDS = 4
+DDGS_BACKEND_ORDER = "duckduckgo,yahoo"
+MAX_INSTITUTIONAL_FETCH_WORKERS = 5
+MAX_ARTICLE_FETCH_WORKERS = 5
 
 _PT_MONTHS = {
     "janeiro": 1, "fevereiro": 2, "março": 3, "marco": 3,
@@ -290,46 +298,316 @@ def _fetch_html(url: str) -> str:
         return payload.decode("utf-8", errors="replace")
 
 
+
+# NEWS_CONTENT_EXTRACTION_V1
+# Limites defensivos para extração de conteúdo de páginas e boletins PDF.
+MAX_ARTICLE_TEXT_CHARS = 9000
+MAX_PDF_PAGES = 10
+MIN_ARTICLE_CONTENT_CHARS = 240
+MAX_EVIDENCE_PASSAGES = 6
+MAX_EVIDENCE_PASSAGE_CHARS = 520
+
+_PDF_URL_RE = re.compile(r"(?:\.pdf(?:/|$)|@@download/file)", re.IGNORECASE)
+_EVIDENCE_TERMS = (
+    "srag", "respirat", "infogripe", "influenza", "rinovírus", "rinovirus",
+    "metapneum", "sars-cov-2", "covid-19", "vírus", "virus", "bronquiolite",
+    "aument", "crescimento", "estabil", "oscila", "redução", "reducao",
+    "queda", "alerta", "risco", "crianças", "criancas", "adolescentes",
+    "internação", "internacao", "óbitos", "obitos", "mortalidade",
+    "alagoas", "roraima", "sergipe", "unidades federativas",
+)
+
+
+def _looks_like_pdf_url(url: str) -> bool:
+    try:
+        return bool(_PDF_URL_RE.search(urlparse(url).path.lower()))
+    except (TypeError, ValueError):
+        return False
+
+
+class _ArticleContentParser(HTMLParser):
+# Extrai blocos textuais de artigo e links para anexos PDF institucionais.
+
+    SKIP_TAGS = {"script", "style", "noscript", "svg", "nav", "header", "footer", "aside", "form"}
+    BLOCK_TAGS = {"h1", "h2", "h3", "h4", "p", "li", "blockquote", "dd", "dt"}
+
+    def __init__(self, base_url: str) -> None:
+        super().__init__(convert_charrefs=True)
+        self.base_url = base_url
+        self.skip_depth = 0
+        self.current_block: str | None = None
+        self.current_parts: list[str] = []
+        self.paragraphs: list[str] = []
+        self.pdf_links: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = dict(attrs)
+        if tag in self.SKIP_TAGS:
+            self.skip_depth += 1
+            return
+        if self.skip_depth:
+            return
+
+        if tag == "a":
+            href = attributes.get("href") or ""
+            absolute = urljoin(self.base_url, href)
+            if _looks_like_pdf_url(absolute) and allowed_url(absolute) and absolute not in self.pdf_links:
+                self.pdf_links.append(absolute)
+
+        if self.current_block is None and tag in self.BLOCK_TAGS:
+            self.current_block = tag
+            self.current_parts = []
+
+    def handle_data(self, data: str) -> None:
+        if not self.skip_depth and self.current_block is not None:
+            cleaned = " ".join(data.split())
+            if cleaned:
+                self.current_parts.append(cleaned)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in self.SKIP_TAGS:
+            self.skip_depth = max(0, self.skip_depth - 1)
+            return
+        if self.skip_depth:
+            return
+        if self.current_block == tag:
+            paragraph = " ".join(self.current_parts).strip()
+            if paragraph and (not self.paragraphs or self.paragraphs[-1] != paragraph):
+                self.paragraphs.append(paragraph)
+            self.current_block = None
+            self.current_parts = []
+
+    @property
+    def text(self) -> str:
+        return "\n".join(self.paragraphs).strip()
+
+
+def _fetch_pdf_bytes(url: str) -> tuple[bytes, str]:
+# Baixa PDF somente de domínio institucional permitido e com tamanho limitado.
+    if not allowed_url(url):
+        raise ValueError("URL do PDF fora da allowlist institucional.")
+    request = Request(
+        url,
+        headers={
+            "User-Agent": "IndiciumHealthcareSRAG/2.0 (+institutional public-health context)",
+            "Accept": "application/pdf,application/octet-stream;q=0.9,*/*;q=0.5",
+        },
+    )
+    with urlopen(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
+        final_url = response.geturl()
+        payload = response.read(MAX_RESPONSE_BYTES + 1)
+    if not allowed_url(final_url):
+        raise ValueError("Redirecionamento do PDF para domínio não permitido.")
+    if len(payload) > MAX_RESPONSE_BYTES:
+        raise ValueError("PDF excede o limite de tamanho permitido.")
+    if not payload.lstrip().startswith(b"%PDF"):
+        raise ValueError("O recurso institucional não retornou um arquivo PDF válido.")
+    return payload, final_url
+
+
+# NEWS_PDF_LINEWRAP_NORMALIZATION_V1
+
+def _normalize_extracted_text(text: str) -> str:
+    """Join soft line wraps from HTML/PDF extraction while preserving paragraphs."""
+    value = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    paragraphs: list[str] = []
+    for paragraph in re.split(r"\n\s*\n+", value):
+        # PDF extraction sometimes hyphenates a word at the end of a visual line.
+        paragraph = re.sub(r"(?<=\w)-[ \t]*\n[ \t]*(?=\w)", "", paragraph)
+        # A single newline is normally a visual line break, not a sentence boundary.
+        paragraph = re.sub(r"[ \t]*\n[ \t]*", " ", paragraph)
+        paragraph = re.sub(r"\s+", " ", paragraph).strip()
+        if paragraph:
+            paragraphs.append(paragraph)
+    return "\n\n".join(paragraphs)
+
+
+def _extract_pdf_text(payload: bytes) -> str:
+    # Extract a bounded number of pages; never execute PDF content.
+    from pypdf import PdfReader
+
+    reader = PdfReader(io.BytesIO(payload), strict=False)
+    pages: list[str] = []
+    page_count = min(len(reader.pages), MAX_PDF_PAGES)
+    total_chars = 0
+    for index in range(page_count):
+        try:
+            page_text = reader.pages[index].extract_text() or ""
+        except Exception:
+            page_text = ""
+        if page_text.strip():
+            pages.append(page_text.strip())
+            total_chars += len(page_text)
+        if total_chars >= MAX_ARTICLE_TEXT_CHARS:
+            break
+    text = _normalize_extracted_text("\n\n".join(pages))
+    return text[:MAX_ARTICLE_TEXT_CHARS]
+
+
+def _select_relevant_passages(text: str) -> list[str]:
+    # Keep literal evidence passages; normalize PDF visual line breaks first.
+    normalized_text = _normalize_extracted_text(text)
+    units: list[str] = []
+    for paragraph in re.split(r"\n{2,}", normalized_text):
+        cleaned = re.sub(r"\s+", " ", paragraph).strip()
+        if not cleaned:
+            continue
+        # Split sentence-like units only after line wrapping has been resolved.
+        for sentence in re.split(
+            r"(?<=[.!?])\s+(?=[A-ZÁÀÂÃÉÊÍÓÔÕÚÇ0-9])", cleaned
+        ):
+            sentence = sentence.strip()
+            if len(sentence) >= 45:
+                units.append(sentence)
+
+    selected: list[str] = []
+    seen: set[str] = set()
+    for unit in units:
+        lower = unit.lower()
+        if any(term in lower for term in _EVIDENCE_TERMS):
+            normalized = re.sub(r"\s+", " ", unit).casefold()
+            if normalized not in seen:
+                selected.append(unit[:MAX_EVIDENCE_PASSAGE_CHARS])
+                seen.add(normalized)
+        if len(selected) >= MAX_EVIDENCE_PASSAGES:
+            break
+
+    if not selected:
+        selected = [unit[:MAX_EVIDENCE_PASSAGE_CHARS] for unit in units[:3]]
+    return selected
+
+def _extract_article_content(url: str) -> tuple[str, str, str]:
+# Retorna (texto, método, URL de conteúdo) para uma página ou relatório oficial.
+    if not allowed_url(url):
+        raise ValueError("URL do artigo fora da allowlist institucional.")
+
+    path = urlparse(url).path.lower()
+    if path.endswith(".pdf") or "@@download/file" in path:
+        payload, final_url = _fetch_pdf_bytes(url)
+        text = _extract_pdf_text(payload)
+        if len(text.strip()) < MIN_ARTICLE_CONTENT_CHARS:
+            raise ValueError("O PDF não contém camada de texto suficiente para análise.")
+        return text[:MAX_ARTICLE_TEXT_CHARS], "pdf_text", final_url
+
+    html = _fetch_html(url)
+    parser = _ArticleContentParser(url)
+    parser.feed(html)
+    parser.close()
+    page_text = parser.text
+
+    # A página de visualização de boletins do gov.br costuma ser uma capa HTML
+    # com link de download. Priorize o anexo PDF nesses casos.
+    is_pdf_view = ".pdf/view" in path or "/pdf/" in path
+    if not is_pdf_view and len(page_text) >= MIN_ARTICLE_CONTENT_CHARS:
+        return page_text[:MAX_ARTICLE_TEXT_CHARS], "html_article", url
+
+    pdf_errors: list[str] = []
+    for pdf_url in parser.pdf_links[:3]:
+        try:
+            payload, final_url = _fetch_pdf_bytes(pdf_url)
+            text = _extract_pdf_text(payload)
+            if len(text.strip()) >= MIN_ARTICLE_CONTENT_CHARS:
+                return text[:MAX_ARTICLE_TEXT_CHARS], "pdf_text", final_url
+        except Exception as exc:
+            pdf_errors.append(type(exc).__name__)
+
+    if len(page_text) >= MIN_ARTICLE_CONTENT_CHARS:
+        return page_text[:MAX_ARTICLE_TEXT_CHARS], "html_article", url
+
+    if pdf_errors:
+        raise ValueError("Não foi possível extrair o conteúdo dos anexos PDF institucionais.")
+    raise ValueError("A página não expôs conteúdo substantivo extraível.")
+
+
+def _enrich_news_item(item: dict[str, Any]) -> dict[str, Any]:
+# Enriquece um resultado com texto de fonte real sem falhar toda a busca.
+    enriched = dict(item)
+    original_summary = str(enriched.get("resumo") or "")
+    enriched.setdefault("resumo_busca", original_summary)
+    url = str(enriched.get("url") or "")
+
+    try:
+        text, method, content_url = _extract_article_content(url)
+        if len(text.strip()) < MIN_ARTICLE_CONTENT_CHARS:
+            raise ValueError("Conteúdo extraído curto demais.")
+        passages = _select_relevant_passages(text)
+        enriched.update({
+            "conteudo_extraido": True,
+            "status_conteudo": "extraido",
+            "metodo_extracao": method,
+            "url_conteudo": content_url,
+            "texto_conteudo": text[:MAX_ARTICLE_TEXT_CHARS],
+            "trechos_relevantes": passages,
+        })
+        if passages:
+            enriched["resumo"] = " ".join(passages[:3])[:1200]
+        else:
+            enriched["resumo"] = text[:1200]
+    except Exception as exc:
+        # A busca continua disponível, mas um snippet não é rotulado como texto do artigo.
+        enriched.update({
+            "conteudo_extraido": False,
+            "status_conteudo": "somente_snippet",
+            "metodo_extracao": "snippet_only",
+            "url_conteudo": url,
+            "texto_conteudo": "",
+            "trechos_relevantes": [],
+            "erro_extracao": type(exc).__name__,
+            "resumo": original_summary,
+        })
+    return enriched
+
+
+
 def _direct_institutional_results() -> tuple[list[dict[str, Any]], list[str]]:
-    """Consulta portais institucionais diretamente como fallback a buscadores."""
+    """Consulta portais institucionais em paralelo, mantendo falha isolada por página."""
     collected: dict[str, dict[str, Any]] = {}
     errors: list[str] = []
     today = date.today()
-    for page_url in INSTITUTIONAL_LISTING_PAGES:
+
+    def fetch_listing(page_url: str) -> tuple[str, str | None, Exception | None]:
         try:
-            html = _fetch_html(page_url)
-            parser = _InstitutionalLinksParser(page_url)
-            parser.feed(html)
-            parser.close()
-            for raw_item in parser.items:
-                item_for_filter = {"title": raw_item["title"], "body": raw_item["body"], "url": raw_item["url"]}
-                if not _is_relevant_national(item_for_filter):
-                    continue
-                if not allowed_url(raw_item["url"]):
-                    continue
-                published = None
-                # Procura apenas a data explícita no texto capturado da página.
-                published = _parse_date(raw_item["body"])
-                if published is None:
-                    continue
-                if not _date_is_recent(published.isoformat(), today=today):
-                    continue
-                key = raw_item["url"].split("#", 1)[0].rstrip("/")
-                if key in collected:
-                    continue
-                collected[key] = {
-                    "titulo": raw_item["title"],
-                    "url": raw_item["url"],
-                    "dominio": urlparse(raw_item["url"]).hostname,
-                    "publicado_em": published.strftime("%d/%m/%Y"),
-                    "resumo": raw_item["body"][:600] or "Resumo não informado no card institucional.",
-                    "_score": _score(item_for_filter),
-                    "_published_date": published,
-                }
-        except (HTTPError, URLError, TimeoutError, OSError, ValueError) as exc:
-            errors.append(f"{urlparse(page_url).hostname}:{type(exc).__name__}")
-        except Exception as exc:  # uma fonte defeituosa não cancela as demais
-            errors.append(f"{urlparse(page_url).hostname}:{type(exc).__name__}")
+            return page_url, _fetch_html(page_url), None
+        except Exception as exc:  # uma página inacessível não bloqueia as demais
+            return page_url, None, exc
+
+    worker_count = min(MAX_INSTITUTIONAL_FETCH_WORKERS, max(1, len(INSTITUTIONAL_LISTING_PAGES)))
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        for page_url, html, error in executor.map(fetch_listing, INSTITUTIONAL_LISTING_PAGES):
+            if error is not None:
+                errors.append(f"{urlparse(page_url).hostname}:{type(error).__name__}")
+                continue
+            try:
+                parser = _InstitutionalLinksParser(page_url)
+                parser.feed(html or "")
+                parser.close()
+                for raw_item in parser.items:
+                    item_for_filter = {
+                        "title": raw_item["title"],
+                        "body": raw_item["body"],
+                        "url": raw_item["url"],
+                    }
+                    if not _is_relevant_national(item_for_filter):
+                        continue
+                    if not allowed_url(raw_item["url"]):
+                        continue
+                    published = _parse_date(raw_item["body"])
+                    if published is None or not _date_is_recent(published.isoformat(), today=today):
+                        continue
+                    key = raw_item["url"].split("#", 1)[0].rstrip("/")
+                    if key in collected:
+                        continue
+                    collected[key] = {
+                        "titulo": raw_item["title"],
+                        "url": raw_item["url"],
+                        "dominio": urlparse(raw_item["url"]).hostname,
+                        "publicado_em": published.strftime("%d/%m/%Y"),
+                        "resumo": raw_item["body"][:600] or "Resumo não informado no card institucional.",
+                        "_score": _score(item_for_filter),
+                        "_published_date": published,
+                    }
+            except Exception as exc:  # parsing de uma página não cancela as demais
+                errors.append(f"{urlparse(page_url).hostname}:{type(exc).__name__}")
 
     ordered = sorted(
         collected.values(),
@@ -340,7 +618,6 @@ def _direct_institutional_results() -> tuple[list[dict[str, Any]], list[str]]:
         item.pop("_score", None)
         item.pop("_published_date", None)
     return ordered[:MAX_NEWS_RESULTS], errors
-
 
 def search_national_news(query: str = "SRAG Brasil") -> dict[str, Any]:
     """Busca notícias institucionais nacionais; indisponibilidade não é evidência epidemiológica."""
@@ -357,7 +634,7 @@ def search_national_news(query: str = "SRAG Brasil") -> dict[str, Any]:
     search_queries_succeeded = 0
     if DDGS is not None:
         try:
-            client = DDGS()
+            client = DDGS(timeout=DDGS_TIMEOUT_SECONDS)
             for base_query in NATIONAL_QUERIES:
                 search_query = f"{base_query} {requested}".strip()
                 try:
@@ -366,7 +643,8 @@ def search_national_news(query: str = "SRAG Brasil") -> dict[str, Any]:
                         search_query,
                         region="br-pt",
                         timelimit=NEWS_TIME_LIMIT,
-                        max_results=8,
+                        max_results=min(5, max(1, int(MAX_NEWS_RESULTS))),
+                        backend=DDGS_BACKEND_ORDER,
                     )
                     search_queries_succeeded += 1
                     for result in results or []:
@@ -419,6 +697,9 @@ def search_national_news(query: str = "SRAG Brasil") -> dict[str, Any]:
 
     ordered = sorted(collected.values(), key=publication_sort_key, reverse=True)
     selected = ordered[:MAX_NEWS_RESULTS]
+    if selected:
+        with ThreadPoolExecutor(max_workers=min(MAX_ARTICLE_FETCH_WORKERS, len(selected))) as executor:
+            selected = list(executor.map(_enrich_news_item, selected))
     sources_used = sorted({item.get("_source", "ddgs") for item in selected})
     for item in selected:
         item.pop("_score", None)
