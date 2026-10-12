@@ -6,11 +6,21 @@ PoC modular de IA generativa para analisar indicadores agregados de Síndrome Re
 
 ## Status da validação local
 
-Validação ponta a ponta executada em **12/10/2026**, usando `gemini-3.8-flash` e os snapshots `INFLUD25-28-09-2026.csv` e `INFLUD26-28-09-2026.csv`. A ingestão persistiu **557.361 registros minimizados**. A execução final terminou com código de saída `0`, produziu relatório e artefatos e foi aprovada pelo Output Validator.
+### Validação ponta a ponta de referência
 
-Na execução aprovada foram registradas 3 chamadas ao LLM, 3 chamadas a ferramentas e duas validações do relatório. A primeira validação apontou números sem proveniência; o fluxo agendou uma tentativa de reparo e a segunda validação foi aprovada. Isso comprova o comportamento observado nessa execução, não garante que fontes ou modelos externos sempre estejam disponíveis.
+Foi registrada uma execução ponta a ponta em **12/10/2026**, utilizando `gemini-3.8-flash` e os snapshots `INFLUD25-28-09-2026.csv` e `INFLUD26-28-09-2026.csv`. Naquela execução, a ingestão persistiu **557.361 registros minimizados**, a aplicação terminou com código de saída `0` e o Output Validator aprovou o relatório após uma tentativa limitada de reparo.
 
-Última suíte automatizada executada após a otimização da busca: **62 testes aprovados**. Foram reportados 186 `DeprecationWarning` relacionados ao tratamento de `Timedelta` em Pandas/NumPy; não foram falhas de teste. O diff de código foi verificado com `git diff --check`.
+Essa execução é uma evidência de referência do comportamento ponta a ponta observado naquele momento. Ela não substitui a execução da suíte automatizada nem garante disponibilidade contínua dos serviços externos.
+
+### Suíte automatizada e integração contínua
+
+Após as últimas alterações de guardrails e métricas, a suíte automatizada foi executada localmente em **12/10/2026**, com o comando `python -m pytest -q`: **65 testes aprovados**, sem avisos de depreciação nessa execução.
+
+O GitHub Actions também passou nos testes para **Python 3.10 e Python 3.12** após a integração das alterações à branch `main`. Consulte a [execução de CI no GitHub Actions](https://github.com/vitorturcisn/indiciumai-healthcare-ai-poc/actions/runs/38294629140).
+
+A suíte automatizada não requer chamadas reais à API do modelo ou aos mecanismos externos de busca. Uma nova validação ponta a ponta continua dependendo de credenciais válidas, conectividade e disponibilidade das fontes.
+
+A validação dos testes e a validação ponta a ponta são evidências distintas; os resultados devem ser interpretados conforme o respectivo escopo.
 
 ## Arquitetura
 
@@ -31,7 +41,7 @@ Consulte [`diagrama_arquitetura_v2.pdf`](diagrama_arquitetura_v2.pdf) para o flu
 2. Pandas interpreta datas e códigos, descarta datas obrigatórias inválidas e reduz os dados aos campos analíticos necessários.
 3. SQLite armazena os registros minimizados. As ferramentas disponibilizam ao LLM agregados e metadados, não linhas individuais.
 4. LangGraph encaminha chamadas reais do Gemini a `consultar_metricas`, `gerar_graficos` e `buscar_noticias`, respeitando o limite de chamadas.
-5. O sistema aplica normalizações determinísticas, executa o Output Validator e, quando configurado, permite uma tentativa limitada de reparo.
+5. O sistema aplica normalizações determinísticas, executa o Output Validator e, quando necessário, permite uma tentativa limitada de reparo.
 6. Relatório, gráficos, qualidade e eventos de auditoria são gravados nos diretórios de saída configurados.
 
 ## Dados e semântica das métricas
@@ -62,7 +72,7 @@ A disponibilidade de provedores de busca pode variar e alguns podem retornar err
 
 O guardrail de entrada bloqueia solicitações que tentem expor dados individuais ou identificadores. O validador de saída verifica seções e gráficos requeridos, números e percentuais com proveniência nos resultados das ferramentas, URLs permitidas e ressalvas metodológicas. Trata-se de uma barreira determinística de consistência, não de uma prova formal de correção semântica: a revisão humana continua necessária.
 
-`audit_log.jsonl` registra, por execução, eventos de início/fim/erro de tools e chamadas ao LLM, IDs, hashes, snapshots das mensagens, respostas, status de validação, reparos e uso de tokens quando disponível. O log não deve receber linhas individuais da base; mantenha prompts e solicitações somente agregados e revise os logs antes de compartilhá-los.
+`audit_log.jsonl` registra eventos por execução, incluindo chamadas de ferramentas e do LLM, hashes, snapshots de mensagens, respostas, status de validação, reparos e uso de tokens quando disponível. O log não deve receber linhas individuais da base. Como prompts e respostas podem conter informações da solicitação, revise e proteja os logs antes de compartilhá-los; não versione arquivos de auditoria gerados localmente.
 
 ## Requisitos e instalação
 
@@ -71,7 +81,7 @@ O guardrail de entrada bloqueia solicitações que tentem expor dados individuai
 - snapshots CSV usados na execução;
 - rede e disponibilidade do modelo/provedor para execução ponta a ponta.
 
-Windows PowerShell, na raiz do projeto:
+No Windows PowerShell, na raiz do projeto:
 
 ```powershell
 python -m venv .venv
@@ -85,7 +95,7 @@ Não grave a chave em código ou em arquivos versionados. Configure-a apenas na 
 
 ## Executar a PoC
 
-Os nomes abaixo correspondem ao snapshot usado na validação de referência; adapte-os aos arquivos disponíveis localmente. Os CSVs são ignorados pelo Git e não devem ser versionados.
+Os nomes abaixo correspondem aos snapshots usados na validação de referência; adapte-os aos arquivos disponíveis localmente. Os CSVs são ignorados pelo Git e não devem ser versionados.
 
 ```powershell
 python -m srag_poc.main `
@@ -111,7 +121,7 @@ Execute:
 python -m pytest -q
 ```
 
-Os testes não precisam de chamada à API ou busca externa. A última execução local registrou 62 testes aprovados; a validação ponta a ponta requer credenciais e rede.
+Na validação local de **12/10/2026**, foram aprovados **65 testes**. A execução da suíte não exige chamadas à API ou busca externa; a validação ponta a ponta requer credenciais e rede. A CI verifica Python 3.10 e 3.12 no GitHub Actions.
 
 Arquivos cobertos:
 
@@ -123,7 +133,11 @@ Arquivos cobertos:
 - `test_orchestration_audit.py` - tool calling, falhas e eventos de auditoria;
 - `test_report_normalization.py` - normalizações determinísticas e regressões metodológicas.
 
-Para regenerar o diagrama PDF após editar `diagrama_arquitetura_v2.py`, instale `reportlab` no ambiente de desenvolvimento e execute `python diagrama_arquitetura_v2.py`.
+Para regenerar o diagrama PDF após editar `diagrama_arquitetura_v2.py`, instale `reportlab` no ambiente de desenvolvimento e execute:
+
+```powershell
+python diagrama_arquitetura_v2.py
+```
 
 ## Referências
 
@@ -133,4 +147,4 @@ Para regenerar o diagrama PDF após editar `diagrama_arquitetura_v2.py`, instale
 
 ## Publicação e controle de versão
 
-Antes de publicar, revise o diff, confira se os CSVs, o SQLite, relatórios e logs estão ignorados pelo Git, execute novamente `python -m pytest -q` e valide que o README e o diagrama correspondem ao código efetivamente entregue. Prefira commits pequenos e com propósito claro; não sobrescreva `main` sem revisão e abra um Pull Request para avaliação.
+Antes de publicar, revise o diff, confira se os CSVs, o SQLite, relatórios e logs estão ignorados pelo Git, execute `python -m pytest -q` e valide que o README e o diagrama correspondem ao código efetivamente entregue. Prefira commits pequenos e com propósito claro; não sobrescreva `main` sem revisão e abra um Pull Request para avaliação.
