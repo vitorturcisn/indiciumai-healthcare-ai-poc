@@ -115,6 +115,9 @@ def test_search_falls_back_when_ddgs_fails(monkeypatch):
     </article>'''
 
     class FakeDDGS:
+        def __init__(self, timeout=5):
+            self.timeout = timeout
+
         def text(self, *args, **kwargs):
             raise RuntimeError("search engine blocked")
 
@@ -131,6 +134,9 @@ def test_search_falls_back_when_ddgs_fails(monkeypatch):
 
 def test_no_results_is_explicit_and_never_claims_no_epidemic(monkeypatch):
     class EmptyDDGS:
+        def __init__(self, timeout=5):
+            self.timeout = timeout
+
         def text(self, *args, **kwargs):
             return []
 
@@ -185,7 +191,8 @@ def test_official_report_is_consulted_even_when_search_fills_result_limit(monkey
     )
 
     class FullDDGS:
-        def __init__(self):
+        def __init__(self, timeout=5):
+            self.timeout = timeout
             self.n = 0
 
         def text(self, *args, **kwargs):
@@ -213,6 +220,7 @@ def test_official_report_is_consulted_even_when_search_fills_result_limit(monkey
 
     monkeypatch.setitem(sys.modules, "ddgs", SimpleNamespace(DDGS=FullDDGS))
     monkeypatch.setattr(news, "_direct_institutional_results", fake_direct)
+    monkeypatch.setattr(news, "_enrich_news_item", lambda item: item)
     monkeypatch.setattr(news, "MAX_NEWS_RESULTS", 5)
 
     result = news.search_national_news("SRAG Brasil")
@@ -221,3 +229,182 @@ def test_official_report_is_consulted_even_when_search_fills_result_limit(monkey
     assert len(result["results"]) == 4
     assert result["results"][0]["url"] == official_url
     assert "institutional_page" in result["fontes_de_busca"]
+
+# NEWS_CONTENT_EXTRACTION_V1
+
+
+def test_enrich_news_item_extracts_substantive_html_article(monkeypatch):
+    html = (
+        "<html><body><nav><p>MENU DE NAVEGAÇÃO QUE NÃO DEVE SER USADO.</p></nav>"
+        "<main><article><h1>InfoGripe: cenário nacional de SRAG</h1>"
+        "<p>O boletim nacional descreve a evolução da Síndrome Respiratória Aguda Grave "
+        "e a circulação de vírus respiratórios em diferentes regiões do Brasil.</p>"
+        "<p>No Brasil, a tendência de SRAG apresenta estabilização no longo prazo, enquanto "
+        "Alagoas, Roraima e Sergipe apresentam alerta ou risco de crescimento segundo o boletim.</p>"
+        "<p>O documento também informa circulação de rinovírus e metapneumovírus, "
+        "com variação entre unidades federativas e faixas etárias.</p>"
+        "</article></main></body></html>"
+    )
+    monkeypatch.setattr(news, "_fetch_html", lambda url: html)
+    item = {
+        "titulo": "InfoGripe: cenário nacional de SRAG",
+        "url": "https://www.gov.br/saude/pt-br/assuntos/noticias-ms/2026/outubro/infogripe-srag",
+        "publicado_em": "08/10/2026",
+        "resumo": "Snippet curto do mecanismo de busca.",
+    }
+
+    result = news._enrich_news_item(item)
+
+    assert result["conteudo_extraido"] is True
+    assert result["status_conteudo"] == "extraido"
+    assert result["metodo_extracao"] == "html_article"
+    assert "estabilização no longo prazo" in result["texto_conteudo"]
+    assert "MENU DE NAVEGAÇÃO" not in result["texto_conteudo"]
+    assert result["trechos_relevantes"]
+    assert result["resumo_busca"] == "Snippet curto do mecanismo de busca."
+
+
+def test_enrich_news_item_extracts_text_from_official_pdf_attachment(monkeypatch):
+    html = (
+        "<html><body><main><article><h1>Informe SE 39 de 2026</h1>"
+        "<p>Boletim oficial de vigilância epidemiológica.</p>"
+        '<a href="https://www.gov.br/saude/documentos/informe-se-39-de-2026.pdf/@@download/file">'
+        "Baixar relatório PDF</a></article></main></body></html>"
+    )
+    pdf_url = "https://www.gov.br/saude/documentos/informe-se-39-de-2026.pdf/@@download/file"
+    extracted_text = (
+        "Informe SE 39 de 2026. No Brasil, a tendência de SRAG apresenta estabilização "
+        "no longo prazo. Alagoas, Roraima e Sergipe estão em alerta ou risco de crescimento. "
+        "O boletim descreve circulação de rinovírus, metapneumovírus e SARS-CoV-2, "
+        "enquanto a incidência de SRAG associada à COVID-19 permanece baixa nacionalmente. "
+    ) * 5
+    monkeypatch.setattr(news, "_fetch_html", lambda url: html)
+    monkeypatch.setattr(news, "_fetch_pdf_bytes", lambda url: (b"%PDF-fake", url))
+    monkeypatch.setattr(news, "_extract_pdf_text", lambda payload: extracted_text)
+
+    result = news._enrich_news_item({
+        "titulo": "Informe SE 39 de 2026",
+        "url": "https://www.gov.br/saude/pt-br/assuntos/saude-de-a-a-z/c/covid-19/atualizacao-de-casos/informe-se-39-de-2026.pdf/view",
+        "publicado_em": "08/10/2026",
+        "resumo": "Resumo no card do portal.",
+    })
+
+    assert result["conteudo_extraido"] is True
+    assert result["metodo_extracao"] == "pdf_text"
+    assert result["url_conteudo"] == pdf_url
+    assert "Roraima" in result["texto_conteudo"]
+    assert result["trechos_relevantes"]
+
+
+def test_enrich_news_item_falls_back_explicitly_when_article_content_fails(monkeypatch):
+    def fail_fetch(url):
+        raise TimeoutError("test timeout")
+
+    monkeypatch.setattr(news, "_fetch_html", fail_fetch)
+    result = news._enrich_news_item({
+        "titulo": "InfoGripe: SRAG",
+        "url": "https://www.gov.br/saude/pt-br/assuntos/noticias-ms/2026/outubro/infogripe-srag",
+        "publicado_em": "08/10/2026",
+        "resumo": "Snippet mantido como snippet.",
+    })
+
+    assert result["conteudo_extraido"] is False
+    assert result["status_conteudo"] == "somente_snippet"
+    assert result["metodo_extracao"] == "snippet_only"
+    assert result["texto_conteudo"] == ""
+    assert result["resumo"] == "Snippet mantido como snippet."
+    assert result["erro_extracao"] == "TimeoutError"
+
+
+def test_extract_pdf_text_reads_a_bounded_number_of_pages(monkeypatch):
+    class FakePage:
+        def __init__(self, text):
+            self.text = text
+            self.calls = 0
+
+        def extract_text(self):
+            self.calls += 1
+            return self.text
+
+    class FakeReader:
+        def __init__(self, stream, strict=False):
+            self.pages = [FakePage(f"Página epidemiológica {index}.") for index in range(15)]
+
+    monkeypatch.setitem(sys.modules, "pypdf", SimpleNamespace(PdfReader=FakeReader))
+    text = news._extract_pdf_text(b"%PDF-fake")
+
+    assert "Página epidemiológica 0" in text
+    assert "Página epidemiológica 9" in text
+    assert "Página epidemiológica 10" not in text
+
+# NEWS_PDF_LINEWRAP_NORMALIZATION_V1
+
+def test_pdf_extraction_joins_visual_line_wraps_and_hyphenated_words(monkeypatch):
+    raw_page_text = (
+        "Nesta edição, observa-se estabilização de casos de Síndrome\n"
+        "Respirató-\nria Aguda Grave na tendência de longo prazo."
+    )
+
+    class FakePage:
+        def extract_text(self):
+            return raw_page_text
+
+    class FakeReader:
+        def __init__(self, stream, strict=False):
+            self.pages = [FakePage()]
+
+    monkeypatch.setitem(sys.modules, "pypdf", SimpleNamespace(PdfReader=FakeReader))
+    text = news._extract_pdf_text(b"%PDF-fake")
+
+    assert "Síndrome Respiratória Aguda Grave" in text
+    assert "Respiratória" in text
+    assert "Respirató-" not in text
+    assert "\n" not in text
+
+
+def test_relevant_passages_join_line_wrapped_evidence_before_selecting():
+    text = (
+        "Nesta edição, que abrange dados até a Semana Epidemiológica (SE) 39 de 2026,\n"
+        "observa-se sinal de estabilização ou oscilação de casos de Síndrome\n"
+        "Respiratória Aguda Grave (SRAG) na tendência de longo prazo.\n\n"
+        "Três unidades federativas apresentam incidência de SRAG em níveis de alerta, risco ou alto\n"
+        "risco e sinal de crescimento: Alagoas, Roraima e Sergipe."
+    )
+
+    passages = news._select_relevant_passages(text)
+
+    assert any(
+        "estabilização ou oscilação" in passage
+        and "Síndrome Respiratória Aguda Grave" in passage
+        for passage in passages
+    )
+    assert any(
+        "níveis de alerta, risco ou alto risco" in passage
+        and "Alagoas, Roraima e Sergipe" in passage
+        for passage in passages
+    )
+
+def test_search_uses_bounded_ddgs_backend_and_timeout(monkeypatch):
+    instances = []
+
+    class CapturingDDGS:
+        def __init__(self, timeout=5):
+            self.timeout = timeout
+            self.calls = []
+            instances.append(self)
+
+        def text(self, query, **kwargs):
+            self.calls.append({"query": query, **kwargs})
+            return []
+
+    monkeypatch.setitem(sys.modules, "ddgs", SimpleNamespace(DDGS=CapturingDDGS))
+    monkeypatch.setattr(news, "_direct_institutional_results", lambda: ([], []))
+
+    result = news.search_national_news("SRAG Brasil")
+
+    assert result["status"] == "no_results"
+    assert len(instances) == 1
+    assert instances[0].timeout == news.DDGS_TIMEOUT_SECONDS
+    assert len(instances[0].calls) == len(news.NATIONAL_QUERIES)
+    assert all(call["backend"] == news.DDGS_BACKEND_ORDER for call in instances[0].calls)
+    assert all(call["max_results"] <= 5 for call in instances[0].calls)

@@ -202,6 +202,115 @@ def _allowed_urls(tool_results: dict[str, Any]) -> set[str]:
             allow.add(url.rstrip("/"))
     return allow
 
+# NEWS_SYNTHESIS_GUARDRAIL_V1
+_NEWS_STOPWORDS = {
+    "para", "como", "mais", "menos", "entre", "sobre", "desde", "após", "antes",
+    "pela", "pelo", "pelas", "pelos", "essa", "esse", "essas", "esses", "esta",
+    "este", "estas", "estes", "também", "quando", "onde", "porque", "sobre", "contra",
+    "foram", "serão", "sendo", "está", "estao", "estão", "houve", "havia", "tem",
+    "têm", "ter", "com", "sem", "dos", "das", "nos", "nas", "uma", "umas", "uns",
+    "que", "por", "uma", "num", "numa", "não", "nao", "sim", "sua", "seu", "suas",
+    "seus", "eles", "elas", "isso", "isto", "aqui", "ali", "todo", "toda", "todos",
+    "todas", "caso", "casos", "sobre", "boletim", "informe", "notícia", "noticia",
+    "notícias", "noticias", "fonte", "fontes", "acordo", "segundo", "contexto",
+    "nacional", "brasil", "brasileiro", "brasileira", "respiratório", "respiratoria",
+    "respiratorio", "srag", "covid", "covid19", "infogripe", "vírus", "virus",
+}
+
+
+def _news_normalize_text(value: Any) -> str:
+    import unicodedata
+
+    folded = unicodedata.normalize("NFKD", str(value or ""))
+    return "".join(character for character in folded if not unicodedata.combining(character)).casefold()
+
+
+def _news_evidence_tokens(value: Any) -> set[str]:
+    normalized = _news_normalize_text(value)
+    tokens = re.findall(r"\b[a-z0-9]{4,}\b", normalized)
+    return {token for token in tokens if token not in _NEWS_STOPWORDS and not token.isdigit()}
+
+
+def _news_item_evidence(item: dict[str, Any]) -> str:
+    passages = item.get("trechos_relevantes")
+    if isinstance(passages, list):
+        useful = [str(part).strip() for part in passages if str(part).strip()]
+        if useful:
+            return "\n".join(useful)
+    return str(item.get("texto_conteudo") or "").strip()
+
+
+def _news_has_limitation_disclosure(section: str) -> bool:
+    normalized = _news_normalize_text(section)
+    accepted_phrases = (
+        "conteudo integral nao foi recuperado",
+        "conteudo integral nao pode ser recuperado",
+        "nao foi possivel extrair o conteudo integral",
+        "nao foi possivel recuperar o texto integral",
+        "apenas os snippets",
+        "apenas os resumos da busca",
+        "somente os resumos da busca",
+        "nao permitem uma sintese substantiva",
+        "nao permitem uma sintese confiavel",
+        "sem acesso ao conteudo integral",
+        "extracao do conteudo falhou",
+    )
+    return any(phrase in normalized for phrase in accepted_phrases)
+
+
+def _validate_news_synthesis(text: str, news_result: Any) -> list[str]:
+    """Exige evidência textual e fonte identificável, ou uma limitação explícita."""
+    if not isinstance(news_result, dict):
+        return []
+    results = news_result.get("results", [])
+    if not isinstance(results, list) or not results:
+        # Erros e ausência de resultados têm regras de transparência próprias.
+        return []
+    items = [item for item in results if isinstance(item, dict)]
+    metadata_present = any(
+        "conteudo_extraido" in item or "status_conteudo" in item or "texto_conteudo" in item
+        for item in items
+    )
+    # Compatibilidade com tool results históricos usados em relatórios antigos/tests;
+    # a implementação atual da ferramenta sempre fornece esses campos.
+    if not metadata_present:
+        return []
+
+    section = _extract_report_section(text, "Contexto externo / notícias")
+    extracted_items = [
+        item for item in items
+        if item.get("conteudo_extraido") is True or item.get("status_conteudo") == "extraido"
+    ]
+    if not extracted_items:
+        if not _news_has_limitation_disclosure(section):
+            return [
+                "A seção de notícias deve informar que o conteúdo integral não foi recuperado quando só há snippets; títulos e URLs não sustentam achados substantivos."
+            ]
+        return []
+
+    section_tokens = _news_evidence_tokens(section)
+    for item in extracted_items:
+        evidence = _news_item_evidence(item)
+        evidence_tokens = _news_evidence_tokens(evidence)
+        if not evidence_tokens:
+            continue
+        overlap = section_tokens & evidence_tokens
+        title = str(item.get("titulo") or "").strip()
+        url = str(item.get("url") or "").strip().rstrip("/")
+        normalized_section = _news_normalize_text(section)
+        source_referenced = bool(url and url in section) or bool(
+            title and _news_normalize_text(title) in normalized_section
+        )
+        # Três termos substantivos comuns entre o corpo extraído e o relatório
+        # reduzem aprovações baseadas apenas no título/URL sem exigir cópia literal.
+        if len(overlap) >= 3 and source_referenced:
+            return []
+
+    return [
+        "A seção de notícias não apresenta um achado concreto apoiado no conteúdo extraído e associado à fonte; títulos e URLs, isoladamente, não bastam."
+    ]
+
+
 def validate_report(text: str, tool_results: dict[str, Any]) -> dict[str, Any]:
     problems: list[str] = []
     lower = text.lower()
@@ -223,6 +332,8 @@ def validate_report(text: str, tool_results: dict[str, Any]) -> dict[str, Any]:
     if isinstance(news_result, dict) and news_result.get("status") == "error":
         if not any(phrase in lower for phrase in ("falha na busca", "busca falhou", "não foi possível realizar a busca", "nao foi possivel realizar a busca")):
             problems.append("A busca de notícias falhou, mas o relatório não informa essa limitação.")
+
+    problems.extend(_validate_news_synthesis(text, news_result))
 
     for graph_name in ("grafico_30_dias.png", "grafico_12_meses.png"):
         if graph_name not in text:
